@@ -1105,9 +1105,41 @@ def input_numero(label, value=0.0, min_value=0.0, step=1000.0, key=None, help=No
         st.caption(f"💵 {formatear_numero(numero)} COP")
    
     return numero
+    
+# ==================== MANTENER SESIÓN ACTIVA ====================
+def mantener_app_activa():
+    """
+    Mantiene la aplicación activa mostrando un contador discreto
+    y refrescando automáticamente cada 4 minutos
+    """
+    # Inicializar el timestamp de última actividad
+    if 'ultima_actividad' not in st.session_state:
+        st.session_state.ultima_actividad = datetime.now()
+    
+    # Calcular tiempo desde última actividad
+    tiempo_inactivo = datetime.now() - st.session_state.ultima_actividad
+    segundos_inactivo = int(tiempo_inactivo.total_seconds())
+    
+    # Auto-refresh cada 4 minutos (240 segundos) para estar seguros
+    if segundos_inactivo > 240:
+        st.session_state.ultima_actividad = datetime.now()
+        st.rerun()
+    
+    # Mostrar indicador discreto en la sidebar
+    with st.sidebar:
+        st.markdown("---")
+        minutos = segundos_inactivo // 60
+        segundos = segundos_inactivo % 60
+        st.caption(f"⏱️ Sesión activa: {minutos}m {segundos}s")
+        
+        # Botón para resetear el timer manualmente
+        if st.button("🔄 Refrescar", key="refresh_manual"):
+            st.session_state.ultima_actividad = datetime.now()
+            st.rerun()
 # ==================== APLICACIÓN PRINCIPAL ====================
 def main():
     st.set_page_config(page_title="Calculadora de Costos Transporte - Colombia 2026", layout="wide")
+    mantener_app_activa()
     st.title("🚛 Sistema de Cálculo de Costos para Transporte de Carga")
     st.markdown("**Versión 3.1 con Formato Numérico Colombiano.** Escribe los números como: 5.000.000")
    
@@ -1874,4 +1906,5 @@ def main():
             st.plotly_chart(fig_rentabilidad)
 
 if __name__ == "__main__":
+
     main()
