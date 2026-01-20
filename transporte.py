@@ -1,17 +1,16 @@
 """
 Sistema de Programación de Rutas y Cálculo de Costos para Tractomulas
-Versión 3.1 - Con Formato Numérico Colombiano
+Versión 3.2 - Conectado a Supabase (PostgreSQL)
 Contexto: Colombia
 Autor: Sistema de Gestión de Transporte de Carga
-Instrucciones para ejecutar:
-1. Instala las dependencias: pip install streamlit openpyxl pandas plotly
-2. Ejecuta: streamlit run transporte.py
-3. Abre el navegador en la URL que te indica (generalmente http://localhost:8501)
 """
+
 import streamlit as st
 import json
 import re
-import sqlite3
+# Eliminamos sqlite3 y usamos psycopg2 para Supabase
+import psycopg2
+from psycopg2 import sql
 from datetime import datetime, timedelta
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Tuple
@@ -22,6 +21,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 import pandas as pd
 import locale
 import plotly.express as px
+
 # Configurar locale para formato colombiano
 try:
     locale.setlocale(locale.LC_ALL, 'es_CO.UTF-8')
@@ -30,6 +30,11 @@ except:
         locale.setlocale(locale.LC_ALL, 'es_ES.UTF-8')
     except:
         pass
+
+# ==================== CONFIGURACIÓN SUPABASE ====================
+# NOTA: Se agrega ?sslmode=require para conectar correctamente con Supabase
+SUPABASE_DB_URL = "postgresql://postgres.verwlkgitpllyneqxlao:Conejito800$@aws-0-us-west-2.pooler.supabase.com:6543/postgres?sslmode=require"
+
 # ==================== FUNCIONES DE FORMATO ====================
 def formatear_numero(valor):
     """Formatea un número al estilo colombiano: 5.000.000"""
@@ -39,6 +44,7 @@ def formatear_numero(valor):
         return f"{int(valor):,}".replace(',', '.')
     except:
         return str(valor)
+
 def formatear_decimal(valor, decimales=2):
     """Formatea un número con decimales al estilo colombiano: 5.000.000,50"""
     if valor is None:
@@ -52,6 +58,7 @@ def formatear_decimal(valor, decimales=2):
         return formatted
     except:
         return str(valor)
+
 def limpiar_numero(texto):
     """Convierte texto con formato colombiano a número"""
     if not texto:
@@ -62,26 +69,28 @@ def limpiar_numero(texto):
         return float(texto)
     except:
         return 0.0
-# ==================== BASE DE DATOS ====================
+
+# ==================== BASE DE DATOS SUPABASE (POSTGRES) ====================
 class DatabaseManager:
-    """Gestor de base de datos SQLite para trazabilidad"""
+    """Gestor de base de datos Supabase (PostgreSQL) para trazabilidad"""
    
-    def __init__(self, db_name="transporte.db"):
-        self.db_name = db_name
+    def __init__(self):
+        self.db_url = SUPABASE_DB_URL
         self.init_database()
    
     def get_connection(self):
-        return sqlite3.connect(self.db_name)
+        return psycopg2.connect(self.db_url)
    
     def init_database(self):
-        """Crea las tablas si no existen"""
+        """Crea las tablas si no existen (Sintaxis PostgreSQL)"""
         conn = self.get_connection()
         cursor = conn.cursor()
        
         # Tabla de viajes con nuevos campos
+        # Nota: AUTOINCREMENT de SQLite cambia a SERIAL en Postgres
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS viajes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 fecha_creacion TEXT NOT NULL,
                 placa TEXT NOT NULL,
                 conductor TEXT NOT NULL,
@@ -127,7 +136,7 @@ class DatabaseManager:
         # Tabla de tractomulas (simplificada)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS tractomulas (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 placa TEXT UNIQUE NOT NULL,
                 consumo_km_galon REAL NOT NULL,
                 tipo TEXT NOT NULL
@@ -137,7 +146,7 @@ class DatabaseManager:
         # Tabla de conductores (simplificada)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS conductores (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 nombre TEXT UNIQUE NOT NULL,
                 cedula TEXT NOT NULL
             )
@@ -146,7 +155,7 @@ class DatabaseManager:
         # Tabla de rutas
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS rutas (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 origen TEXT NOT NULL,
                 destino TEXT NOT NULL,
                 distancia_km REAL NOT NULL,
@@ -156,7 +165,6 @@ class DatabaseManager:
        
         conn.commit()
         conn.close()
-   
     def guardar_viaje(self, calculadora, observaciones=""):
         """Guarda un viaje en la base de datos"""
         conn = self.get_connection()
@@ -165,6 +173,7 @@ class DatabaseManager:
         costos = calculadora.calcular_costos_totales()
         fecha_actual = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
        
+        # Nota: Se ha añadido el %s faltante para 'observaciones' al final (36 marcadores en total)
         cursor.execute('''
             INSERT INTO viajes (
                 fecha_creacion, placa, conductor, origen, destino,
@@ -176,7 +185,7 @@ class DatabaseManager:
                 cargue_descargue, otros, total_gastos, legalizacion,
                 punto_equilibrio, valor_flete, utilidad, rentabilidad,
                 ant_empresa, saldo_empresa, observaciones
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ''', (
             fecha_actual,
             calculadora.tractomula.placa,
@@ -221,7 +230,6 @@ class DatabaseManager:
         conn.close()
        
         return viaje_id
-   
     def obtener_todos_viajes(self):
         """Obtiene todos los viajes ordenados por fecha"""
         conn = self.get_connection()
@@ -234,31 +242,32 @@ class DatabaseManager:
         """Busca viajes con filtros"""
         conn = self.get_connection()
        
+        # Usamos cast para manejar fechas como texto en formato YYYY-MM-DD
         query = "SELECT * FROM viajes WHERE 1=1"
         params = []
        
         if fecha_inicio:
-            query += " AND date(fecha_creacion) >= ?"
+            query += " AND to_date(fecha_creacion, 'YYYY-MM-DD') >= %s"
             params.append(fecha_inicio)
        
         if fecha_fin:
-            query += " AND date(fecha_creacion) <= ?"
+            query += " AND to_date(fecha_creacion, 'YYYY-MM-DD') <= %s"
             params.append(fecha_fin)
        
         if placa:
-            query += " AND placa = ?"
+            query += " AND placa = %s"
             params.append(placa)
        
         if conductor:
-            query += " AND conductor LIKE ?"
+            query += " AND conductor LIKE %s"
             params.append(f"%{conductor}%")
        
         if origen:
-            query += " AND origen LIKE ?"
+            query += " AND origen LIKE %s"
             params.append(f"%{origen}%")
        
         if destino:
-            query += " AND destino LIKE ?"
+            query += " AND destino LIKE %s"
             params.append(f"%{destino}%")
        
         query += " ORDER BY fecha_creacion DESC"
@@ -271,7 +280,7 @@ class DatabaseManager:
         """Obtiene un viaje específico por ID"""
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM viajes WHERE id = ?", (viaje_id,))
+        cursor.execute("SELECT * FROM viajes WHERE id = %s", (viaje_id,))
         viaje = cursor.fetchone()
         conn.close()
         return viaje
@@ -280,7 +289,7 @@ class DatabaseManager:
         """Elimina un viaje por ID"""
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM viajes WHERE id = ?", (viaje_id,))
+        cursor.execute("DELETE FROM viajes WHERE id = %s", (viaje_id,))
         conn.commit()
         conn.close()
    
@@ -322,6 +331,7 @@ class DatabaseManager:
        
         data = {}
        
+        # Sintaxis adaptada para PostgreSQL
         cursor.execute("""
             SELECT
                 COUNT(*) as total_viajes,
@@ -331,7 +341,7 @@ class DatabaseManager:
                 SUM(utilidad) as total_utilidad,
                 AVG(utilidad) as utilidad_promedio
             FROM viajes
-            WHERE date(fecha_creacion) >= ?
+            WHERE to_date(fecha_creacion, 'YYYY-MM-DD') >= %s
         """, (inicio_mes,))
        
         row = cursor.fetchone()
@@ -352,7 +362,7 @@ class DatabaseManager:
                 SUM(valor_flete) as ingresos,
                 SUM(utilidad) as utilidad
             FROM viajes
-            WHERE date(fecha_creacion) >= ?
+            WHERE to_date(fecha_creacion, 'YYYY-MM-DD') >= %s
             GROUP BY placa
             ORDER BY utilidad DESC
         """, (inicio_mes,))
@@ -366,7 +376,7 @@ class DatabaseManager:
                 SUM(utilidad) as utilidad,
                 AVG(utilidad) as utilidad_promedio
             FROM viajes
-            WHERE date(fecha_creacion) >= ?
+            WHERE to_date(fecha_creacion, 'YYYY-MM-DD') >= %s
             GROUP BY conductor
             ORDER BY utilidad DESC
         """, (inicio_mes,))
@@ -381,7 +391,7 @@ class DatabaseManager:
                 AVG(utilidad) as utilidad_promedio,
                 SUM(utilidad) as utilidad_total
             FROM viajes
-            WHERE date(fecha_creacion) >= ?
+            WHERE to_date(fecha_creacion, 'YYYY-MM-DD') >= %s
             GROUP BY origen, destino
             ORDER BY utilidad_total DESC
             LIMIT 5
@@ -389,15 +399,16 @@ class DatabaseManager:
        
         data['rutas_rentables'] = cursor.fetchall()
        
+        # PostgreSQL usa CURRENT_DATE - INTERVAL en lugar de date('now', '-6 months')
         cursor.execute("""
             SELECT
-                strftime('%Y-%m', fecha_creacion) as mes,
+                to_char(to_date(fecha_creacion, 'YYYY-MM-DD'), 'YYYY-MM') as mes,
                 COUNT(*) as viajes,
                 SUM(total_gastos) as gastos,
                 SUM(valor_flete) as ingresos,
                 SUM(utilidad) as utilidad
             FROM viajes
-            WHERE date(fecha_creacion) >= date('now', '-6 months')
+            WHERE to_date(fecha_creacion, 'YYYY-MM-DD') >= CURRENT_DATE - INTERVAL '6 months'
             GROUP BY mes
             ORDER BY mes
         """)
@@ -458,11 +469,11 @@ class DatabaseManager:
         params = []
         
         if fecha_inicio:
-            query += " AND date(fecha_creacion) >= ?"
+            query += " AND to_date(fecha_creacion, 'YYYY-MM-DD') >= %s"
             params.append(fecha_inicio)
         
         if fecha_fin:
-            query += " AND date(fecha_creacion) <= ?"
+            query += " AND to_date(fecha_creacion, 'YYYY-MM-DD') <= %s"
             params.append(fecha_fin)
         
         query += " GROUP BY placa ORDER BY placa"
@@ -496,11 +507,11 @@ class DatabaseManager:
         try:
             cursor.execute('''
                 INSERT INTO tractomulas (placa, consumo_km_galon, tipo)
-                VALUES (?, ?, ?)
+                VALUES (%s, %s, %s)
             ''', (tractomula.placa, tractomula.consumo_km_galon, tractomula.tipo))
             conn.commit()
             return True
-        except sqlite3.IntegrityError:
+        except Exception: # Capturamos genérico o psycopg2.errors.UniqueViolation
             return False
         finally:
             conn.close()
@@ -522,7 +533,7 @@ class DatabaseManager:
         """Elimina una tractomula"""
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM tractomulas WHERE placa = ?", (placa,))
+        cursor.execute("DELETE FROM tractomulas WHERE placa = %s", (placa,))
         conn.commit()
         conn.close()
    
@@ -535,11 +546,11 @@ class DatabaseManager:
         try:
             cursor.execute('''
                 INSERT INTO conductores (nombre, cedula)
-                VALUES (?, ?)
+                VALUES (%s, %s)
             ''', (conductor.nombre, conductor.cedula))
             conn.commit()
             return True
-        except sqlite3.IntegrityError:
+        except Exception:
             return False
         finally:
             conn.close()
@@ -559,7 +570,7 @@ class DatabaseManager:
         """Elimina un conductor"""
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM conductores WHERE nombre = ?", (nombre,))
+        cursor.execute("DELETE FROM conductores WHERE nombre = %s", (nombre,))
         conn.commit()
         conn.close()
    
@@ -571,7 +582,7 @@ class DatabaseManager:
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO rutas (origen, destino, distancia_km, es_frontera)
-            VALUES (?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s)
         ''', (ruta.origen, ruta.destino, ruta.distancia_km, 1 if ruta.es_frontera else 0))
         conn.commit()
         ruta_id = cursor.lastrowid
@@ -595,9 +606,10 @@ class DatabaseManager:
         """Elimina una ruta por ID"""
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM rutas WHERE id = ?", (ruta_id,))
+        cursor.execute("DELETE FROM rutas WHERE id = %s", (ruta_id,))
         conn.commit()
         conn.close()
+
 # ==================== CLASES DE DATOS ====================
 @dataclass
 class Tractomula:
@@ -1906,5 +1918,4 @@ def main():
             st.plotly_chart(fig_rentabilidad)
 
 if __name__ == "__main__":
-
     main()
