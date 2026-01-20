@@ -1153,7 +1153,7 @@ def main():
     st.set_page_config(page_title="Calculadora de Costos Transporte - Colombia 2026", layout="wide")
     mantener_app_activa()
     st.title("🚛 Sistema de Cálculo de Costos para Transporte de Carga")
-    st.markdown("**Versión 3.1 con Formato Numérico Colombiano.** Escribe los números como: 5.000.000")
+    st.markdown("**Sistema de Gestión de Flotas y Fletes")
    
     # Inicializar session state
     if 'datos' not in st.session_state:
@@ -1919,3 +1919,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
