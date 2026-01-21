@@ -1,3 +1,10 @@
+"""
+Sistema de Programación de Rutas y Cálculo de Costos para Tractomulas
+Versión 3.4 - Conectado a Supabase (PostgreSQL) - CORREGIDO
+Contexto: Colombia
+Autor: Sistema de Gestión de Transporte de Carga
+"""
+
 import streamlit as st
 import re
 import psycopg2
@@ -21,26 +28,48 @@ except:
     except:
         pass
 
+
 # ==================== CONFIGURACIÓN SUPABASE ====================
 SUPABASE_DB_URL = "postgresql://postgres.verwlkgitpllyneqxlao:Conejito800$@aws-0-us-west-2.pooler.supabase.com:6543/postgres?sslmode=require"
 
+
 # ==================== FUNCIONES DE FORMATO ====================
 def formatear_numero(valor):
-    if valor is None: return "0"
-    try: return f"{int(valor):,}".replace(',', '.')
-    except: return str(valor)
+    """Formatea un número al estilo colombiano: 5.000.000"""
+    if valor is None:
+        return "0"
+    try:
+        return f"{int(valor):,}".replace(',', '.')
+    except:
+        return str(valor)
+
 
 def formatear_decimal(valor, decimales=2):
-    if valor is None: return "0,00"
+    """Formatea un número con decimales al estilo colombiano: 5.000.000,50"""
+    if valor is None:
+        return "0,00"
     try:
         formatted = f"{float(valor):,.{decimales}f}"
-        return formatted.replace(',', 'TEMP').replace('.', ',').replace('TEMP', '.')
-    except: return str(valor)
+        # Reemplazar separadores: primero decimales, luego miles
+        formatted = formatted.replace(',', 'TEMP')
+        formatted = formatted.replace('.', ',')
+        formatted = formatted.replace('TEMP', '.')
+        return formatted
+    except:
+        return str(valor)
+
 
 def limpiar_numero(texto):
-    if not texto: return 0.0
-    try: return float(str(texto).replace('.', '').replace(',', '.'))
-    except: return 0.0
+    """Convierte texto con formato colombiano a número"""
+    if not texto:
+        return 0.0
+    try:
+        # Remover puntos de miles y reemplazar coma decimal por punto
+        texto = str(texto).replace('.', '').replace(',', '.')
+        return float(texto)
+    except:
+        return 0.0
+
 
 # ==================== BASE DE DATOS SUPABASE (CORREGIDA) ====================
 class DatabaseManager:
@@ -54,13 +83,13 @@ class DatabaseManager:
         return psycopg2.connect(self.db_url)
 
     def init_database(self):
-        """Crea las tablas si no existen con la estructura NUEVA"""
+        """Crea las tablas si no existen (Sintaxis PostgreSQL)"""
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
 
             # NOTA: Cambiamos a 'viajes_v4' para asegurar que la tabla tenga todas las columnas nuevas
-            # Si usas la tabla vieja, faltarán columnas y fallará el INSERT.
+            # y evitar el error IndexError por columnas faltantes
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS viajes_v4 (
                     id SERIAL PRIMARY KEY,
@@ -106,6 +135,7 @@ class DatabaseManager:
                 )
             ''')
 
+            # Tabla de tractomulas
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS tractomulas (
                     id SERIAL PRIMARY KEY,
@@ -115,6 +145,7 @@ class DatabaseManager:
                 )
             ''')
 
+            # Tabla de conductores
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS conductores (
                     id SERIAL PRIMARY KEY,
@@ -123,6 +154,7 @@ class DatabaseManager:
                 )
             ''')
 
+            # Tabla de rutas
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS rutas (
                     id SERIAL PRIMARY KEY,
@@ -141,7 +173,7 @@ class DatabaseManager:
             st.error(f"Error inicializando base de datos: {e}")
 
     def guardar_viaje(self, calculadora, observaciones=""):
-        """Guarda un viaje en la base de datos de manera segura"""
+        """Guarda un viaje en la base de datos"""
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -206,7 +238,7 @@ class DatabaseManager:
                 str(observaciones)
             ))
 
-            # CORRECCIÓN DEL ERROR: Verificar si retornó ID
+            # Obtener el ID generado con seguridad
             result = cursor.fetchone()
             if result:
                 viaje_id = result[0]
@@ -217,12 +249,12 @@ class DatabaseManager:
             conn.commit()
             conn.close()
             return viaje_id
-
         except Exception as e:
             st.error(f"❌ Error al guardar en base de datos: {e}")
             return None
 
     def obtener_todos_viajes(self):
+        """Obtiene todos los viajes ordenados por fecha"""
         conn = self.get_connection()
         query = "SELECT * FROM viajes_v4 ORDER BY fecha_creacion DESC"
         df = pd.read_sql_query(query, conn)
@@ -230,6 +262,7 @@ class DatabaseManager:
         return df
 
     def buscar_viajes(self, fecha_inicio=None, fecha_fin=None, placa=None, conductor=None, origen=None, destino=None):
+        """Busca viajes con filtros"""
         conn = self.get_connection()
         query = "SELECT * FROM viajes_v4 WHERE 1=1"
         params = []
@@ -257,6 +290,7 @@ class DatabaseManager:
         return df
 
     def obtener_viaje_por_id(self, viaje_id):
+        """Obtiene un viaje específico por ID"""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM viajes_v4 WHERE id = %s", (viaje_id,))
@@ -265,6 +299,7 @@ class DatabaseManager:
         return viaje
 
     def eliminar_viaje(self, viaje_id):
+        """Elimina un viaje por ID"""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("DELETE FROM viajes_v4 WHERE id = %s", (viaje_id,))
@@ -272,6 +307,7 @@ class DatabaseManager:
         conn.close()
 
     def obtener_estadisticas(self):
+        """Obtiene estadísticas generales"""
         conn = self.get_connection()
         cursor = conn.cursor()
         stats = {}
@@ -294,6 +330,7 @@ class DatabaseManager:
         return stats
 
     def obtener_dashboard_data(self):
+        """Obtiene datos para el dashboard"""
         conn = self.get_connection()
         cursor = conn.cursor()
         hoy = datetime.now()
@@ -361,6 +398,7 @@ class DatabaseManager:
             """)
             data['viajes_no_rentables'] = cursor.fetchall()
 
+            # Nuevas métricas para UT BRUTA, UT NETA, % UT
             cursor.execute("""
                 SELECT SUM(valor_flete) as ut_bruta, SUM(utilidad) as ut_neta
                 FROM viajes_v4 WHERE to_date(fecha_creacion, 'YYYY-MM-DD') >= %s
@@ -372,9 +410,9 @@ class DatabaseManager:
             data['ut_bruta'] = ut_bruta
             data['ut_neta'] = ut_neta
             data['porcentaje_ut'] = porcentaje_ut
-            
+        
         except Exception:
-            # En caso de error (tabla vacía o no existe), retornar valores en cero
+             # En caso de error (tabla vacía o no existe), retornar valores en cero
             data = {k: 0 for k in ['ut_bruta', 'ut_neta', 'porcentaje_ut']}
             data['mes_actual'] = {k: 0 for k in ['total_viajes', 'total_km', 'total_gastos', 'total_ingresos', 'total_utilidad', 'utilidad_promedio']}
             data['por_tractomula'] = []
@@ -387,6 +425,7 @@ class DatabaseManager:
         return data
 
     def obtener_totales_por_placa(self, fecha_inicio=None, fecha_fin=None):
+        """Obtiene totales acumulados por placa con filtros de fecha"""
         conn = self.get_connection()
         query = """
             SELECT placa, SUM(valor_flete) as total_cxc, SUM(nomina_admin) as total_admin,
@@ -414,36 +453,42 @@ class DatabaseManager:
 
         try:
             df = pd.read_sql_query(query, conn, params=params)
-            # Calcular compuestos
-            if not df.empty:
-                df['total_gastos'] = (
-                    df['total_admin'] + df['total_parafiscales'] + df['total_comision'] +
-                    df['total_mantenimiento'] + df['total_seguros'] + df['total_tecnomecanica'] +
-                    df['total_llantas'] + df['total_aceite'] + df['total_combustible'] +
-                    df['total_flypass'] + df['total_peajes'] + df['total_cruce_frontera'] +
-                    df['total_hotel'] + df['total_comida'] + df['total_parqueo'] +
-                    df['total_cargue_descargue'] + df['total_otros']
-                )
-                df['total_punto_equilibrio'] = df['total_gastos'] / 0.5
-                df['total_ut'] = df['total_cxc'] - df['total_gastos']
-                df['total_rentabilidad'] = (df['total_ut'] / df['total_cxc'] * 100).where(df['total_cxc'] != 0, 0)
         except Exception:
             df = pd.DataFrame()
             
         conn.close()
+
+        # Calcular compuestos
+        if not df.empty:
+            df['total_gastos'] = (
+                df['total_admin'] + df['total_parafiscales'] + df['total_comision'] +
+                df['total_mantenimiento'] + df['total_seguros'] + df['total_tecnomecanica'] +
+                df['total_llantas'] + df['total_aceite'] + df['total_combustible'] +
+                df['total_flypass'] + df['total_peajes'] + df['total_cruce_frontera'] +
+                df['total_hotel'] + df['total_comida'] + df['total_parqueo'] +
+                df['total_cargue_descargue'] + df['total_otros']
+            )
+            df['total_punto_equilibrio'] = df['total_gastos'] / 0.5
+            df['total_ut'] = df['total_cxc'] - df['total_gastos']
+            df['total_rentabilidad'] = (df['total_ut'] / df['total_cxc'] * 100).where(df['total_cxc'] != 0, 0)
+
         return df
 
-    # Métodos para tractomulas, conductores y rutas (sin cambios mayores)
+    # Métodos para tractomulas
     def guardar_tractomula(self, tractomula):
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute('INSERT INTO tractomulas (placa, consumo_km_galon, tipo) VALUES (%s, %s, %s)',
-                         (tractomula.placa, tractomula.consumo_km_galon, tractomula.tipo))
+            cursor.execute('''
+                INSERT INTO tractomulas (placa, consumo_km_galon, tipo)
+                VALUES (%s, %s, %s)
+            ''', (tractomula.placa, tractomula.consumo_km_galon, tractomula.tipo))
             conn.commit()
             return True
-        except Exception: return False
-        finally: conn.close()
+        except Exception:
+            return False
+        finally:
+            conn.close()
 
     def obtener_tractomulas(self):
         conn = self.get_connection()
@@ -451,7 +496,11 @@ class DatabaseManager:
         cursor.execute("SELECT * FROM tractomulas ORDER BY placa")
         tractomulas = []
         for row in cursor.fetchall():
-            tractomulas.append(Tractomula(placa=row[1], consumo_km_galon=row[2], tipo=row[3]))
+            tractomulas.append(Tractomula(
+                placa=row[1],
+                consumo_km_galon=row[2],
+                tipo=row[3]
+            ))
         conn.close()
         return tractomulas
 
@@ -462,16 +511,21 @@ class DatabaseManager:
         conn.commit()
         conn.close()
 
+    # Métodos para conductores
     def guardar_conductor(self, conductor):
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute('INSERT INTO conductores (nombre, cedula) VALUES (%s, %s)',
-                         (conductor.nombre, conductor.cedula))
+            cursor.execute('''
+                INSERT INTO conductores (nombre, cedula)
+                VALUES (%s, %s)
+            ''', (conductor.nombre, conductor.cedula))
             conn.commit()
             return True
-        except Exception: return False
-        finally: conn.close()
+        except Exception:
+            return False
+        finally:
+            conn.close()
 
     def obtener_conductores(self):
         conn = self.get_connection()
@@ -490,17 +544,29 @@ class DatabaseManager:
         conn.commit()
         conn.close()
 
+    # Métodos para rutas
     def guardar_ruta(self, ruta):
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO rutas (origen, destino, distancia_km, es_frontera, es_regional, es_aguachica)
             VALUES (%s, %s, %s, %s, %s, %s)
-        ''', (ruta.origen, ruta.destino, ruta.distancia_km, 1 if ruta.es_frontera else 0,
-              1 if ruta.es_regional else 0, 1 if ruta.es_aguachica else 0))
+        ''', (
+            ruta.origen, ruta.destino, ruta.distancia_km,
+            1 if ruta.es_frontera else 0,
+            1 if ruta.es_regional else 0,
+            1 if ruta.es_aguachica else 0
+        ))
         conn.commit()
-        try: ruta_id = cursor.fetchone()[0]
-        except: ruta_id = cursor.lastrowid
+        # Intentar obtener el ID insertado
+        try:
+            ruta_id = cursor.fetchone()[0]
+        except:
+            # Fallback
+            try:
+                ruta_id = cursor.lastrowid
+            except:
+                ruta_id = None
         conn.close()
         return ruta_id
 
@@ -510,10 +576,14 @@ class DatabaseManager:
         cursor.execute("SELECT * FROM rutas ORDER BY origen, destino")
         rutas = []
         for row in cursor.fetchall():
-            rutas.append(Ruta(origen=row[1], destino=row[2], distancia_km=row[3],
-                            es_frontera=bool(row[4]),
-                            es_regional=bool(row[5]) if len(row) > 5 else False,
-                            es_aguachica=bool(row[6]) if len(row) > 6 else False))
+            rutas.append(Ruta(
+                origen=row[1],
+                destino=row[2],
+                distancia_km=row[3],
+                es_frontera=bool(row[4]),
+                es_regional=bool(row[5]) if len(row) > 5 else False,
+                es_aguachica=bool(row[6]) if len(row) > 6 else False
+            ))
         conn.close()
         return rutas
 
@@ -531,6 +601,8 @@ class Tractomula:
     placa: str
     consumo_km_galon: float
     tipo: str
+
+
 @dataclass
 class Conductor:
     nombre: str
@@ -1566,35 +1638,32 @@ def main():
 
                         if guardar:
                             viaje_id = db.guardar_viaje(calculadora, observaciones)
-                            costos = calculadora.calcular_costos_totales()
+                            if viaje_id:
+                                costos = calculadora.calcular_costos_totales()
+                                utilidad = costos.get('utilidad', 0)
+                                if utilidad >= 0:
+                                    st.success(f"""
+                                    ✅ **Viaje guardado exitosamente (ID: {viaje_id})**
 
-                            # Protección contra None o valor no numérico
-                            utilidad = costos.get('utilidad')
-                            if utilidad is None:
-                                st.error("⚠️ Error al calcular utilidad. Verifica que el valor del flete sea válido y mayor a 0.")
-                                st.info(f"Valor flete ingresado: {calculadora.valor_flete}")
-                                st.info(f"Costos calculados: {costos}")
-                            elif utilidad >= 0:
-                                st.success(f"""
-                                ✅ **Viaje guardado exitosamente (ID: {viaje_id})**
+                                    - Total Gastos: ${formatear_numero(costos['total_gastos'])}
+                                    - Valor Flete: ${formatear_numero(calculadora.valor_flete)}
+                                    - **Utilidad: ${formatear_numero(utilidad)}**
+                                    - **Rentabilidad: {costos['rentabilidad']:.1f}%**
+                                    - **Saldo: ${formatear_numero(costos['saldo'])}**")
+                                    """)
+                                else:
+                                    st.error(f"""
+                                    ⚠️ **Viaje guardado (ID: {viaje_id}) - PÉRDIDA DETECTADA**
 
-                                - Total Gastos: ${formatear_numero(costos['total_gastos'])}
-                                - Valor Flete: ${formatear_numero(calculadora.valor_flete)}
-                                - **Utilidad: ${formatear_numero(utilidad)}**
-                                - **Rentabilidad: {costos['rentabilidad']:.1f}%**
-                                - **Saldo: ${formatear_numero(costos['saldo'])}**")
-                            """)
+                                    - Total Gastos: ${formatear_numero(costos['total_gastos'])}
+                                    - Valor Flete: ${formatear_numero(calculadora.valor_flete)}
+                                    - **Pérdida: ${formatear_numero(utilidad)}**
+                                    - **Rentabilidad: {costos['rentabilidad']:.1f}%**
+
+                                    ⚠️ Este viaje NO fue rentable.
+                                    """)
                             else:
-                                st.error(f"""
-                                ⚠️ **Viaje guardado (ID: {viaje_id}) - PÉRDIDA DETECTADA**
-
-                                - Total Gastos: ${formatear_numero(costos['total_gastos'])}
-                                - Valor Flete: ${formatear_numero(calculadora.valor_flete)}
-                                - **Pérdida: ${formatear_numero(utilidad)}**
-                                - **Rentabilidad: {costos['rentabilidad']:.1f}%**
-
-                                ⚠️ Este viaje NO fue rentable.
-                                """)
+                                st.error("❌ Error al guardar el viaje en la base de datos.")
                         else:
                             st.success("✅ Cálculo completado! Ve a la pestaña de Reportes.")
 
@@ -1722,7 +1791,6 @@ def main():
                         st.write(f"**Punto Equilibrio:** ${formatear_numero(viaje[30])}")
                         st.write(f"**Valor Flete:** ${formatear_numero(viaje[31])}")
 
-                        # CORRECCIÓN: Manejo de None para utilidad y rentabilidad
                         utilidad = viaje[32] if viaje[32] is not None else 0
                         rentabilidad = viaje[33] if viaje[33] is not None else 0
 
