@@ -1,11 +1,3 @@
-
-"""
-Sistema de Programación de Rutas y Cálculo de Costos para Tractomulas
-Versión 3.3 - Conectado a Supabase (PostgreSQL) - ACTUALIZADO
-Contexto: Colombia
-Autor: Sistema de Gestión de Transporte de Carga
-"""
-
 import streamlit as st
 import re
 import psycopg2
@@ -29,51 +21,28 @@ except:
     except:
         pass
 
-
 # ==================== CONFIGURACIÓN SUPABASE ====================
-# NOTA: Se agrega ?sslmode=require para conectar correctamente con Supabase
 SUPABASE_DB_URL = "postgresql://postgres.verwlkgitpllyneqxlao:Conejito800$@aws-0-us-west-2.pooler.supabase.com:6543/postgres?sslmode=require"
-
 
 # ==================== FUNCIONES DE FORMATO ====================
 def formatear_numero(valor):
-    """Formatea un número al estilo colombiano: 5.000.000"""
-    if valor is None:
-        return "0"
-    try:
-        return f"{int(valor):,}".replace(',', '.')
-    except:
-        return str(valor)
-
+    if valor is None: return "0"
+    try: return f"{int(valor):,}".replace(',', '.')
+    except: return str(valor)
 
 def formatear_decimal(valor, decimales=2):
-    """Formatea un número con decimales al estilo colombiano: 5.000.000,50"""
-    if valor is None:
-        return "0,00"
+    if valor is None: return "0,00"
     try:
         formatted = f"{float(valor):,.{decimales}f}"
-        # Reemplazar separadores: primero decimales, luego miles
-        formatted = formatted.replace(',', 'TEMP')
-        formatted = formatted.replace('.', ',')
-        formatted = formatted.replace('TEMP', '.')
-        return formatted
-    except:
-        return str(valor)
-
+        return formatted.replace(',', 'TEMP').replace('.', ',').replace('TEMP', '.')
+    except: return str(valor)
 
 def limpiar_numero(texto):
-    """Convierte texto con formato colombiano a número"""
-    if not texto:
-        return 0.0
-    try:
-        # Remover puntos de miles y reemplazar coma decimal por punto
-        texto = str(texto).replace('.', '').replace(',', '.')
-        return float(texto)
-    except:
-        return 0.0
+    if not texto: return 0.0
+    try: return float(str(texto).replace('.', '').replace(',', '.'))
+    except: return 0.0
 
-
-# ==================== BASE DE DATOS SUPABASE (POSTGRES) ====================
+# ==================== BASE DE DATOS SUPABASE (CORREGIDA) ====================
 class DatabaseManager:
     """Gestor de base de datos Supabase (PostgreSQL) para trazabilidad"""
 
@@ -85,176 +54,184 @@ class DatabaseManager:
         return psycopg2.connect(self.db_url)
 
     def init_database(self):
-        """Crea las tablas si no existen (Sintaxis PostgreSQL)"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
+        """Crea las tablas si no existen con la estructura NUEVA"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
 
-        # Tabla de viajes con nuevos campos: anticipo, saldo, hubo_anticipo_empresa
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS viajes (
-                id SERIAL PRIMARY KEY,
-                fecha_creacion TEXT NOT NULL,
-                placa TEXT NOT NULL,
-                conductor TEXT NOT NULL,
-                origen TEXT NOT NULL,
-                destino TEXT NOT NULL,
-                distancia_km REAL NOT NULL,
-                dias_viaje INTEGER NOT NULL,
-                es_frontera INTEGER NOT NULL,
-                hubo_parqueo INTEGER NOT NULL,
-                nomina_admin REAL,
-                nomina_conductor REAL,
-                comision_conductor REAL,
-                mantenimiento REAL,
-                seguros REAL,
-                tecnomecanica REAL,
-                llantas REAL,
-                aceite REAL,
-                combustible REAL,
-                galones_necesarios REAL,
-                flypass REAL,
-                peajes REAL,
-                cruce_frontera REAL,
-                hotel REAL,
-                comida REAL,
-                parqueo REAL,
-                cargue_descargue REAL,
-                otros REAL,
-                total_gastos REAL,
-                legalizacion REAL,
-                punto_equilibrio REAL,
-                valor_flete REAL,
-                utilidad REAL,
-                rentabilidad REAL,
-                anticipo REAL,
-                saldo REAL,
-                hubo_anticipo_empresa INTEGER,
-                ant_empresa REAL,
-                saldo_empresa REAL,
-                observaciones TEXT
-            )
-        ''')
+            # NOTA: Cambiamos a 'viajes_v4' para asegurar que la tabla tenga todas las columnas nuevas
+            # Si usas la tabla vieja, faltarán columnas y fallará el INSERT.
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS viajes_v4 (
+                    id SERIAL PRIMARY KEY,
+                    fecha_creacion TEXT NOT NULL,
+                    placa TEXT NOT NULL,
+                    conductor TEXT NOT NULL,
+                    origen TEXT NOT NULL,
+                    destino TEXT NOT NULL,
+                    distancia_km REAL NOT NULL,
+                    dias_viaje INTEGER NOT NULL,
+                    es_frontera INTEGER NOT NULL,
+                    hubo_parqueo INTEGER NOT NULL,
+                    nomina_admin REAL,
+                    nomina_conductor REAL,
+                    comision_conductor REAL,
+                    mantenimiento REAL,
+                    seguros REAL,
+                    tecnomecanica REAL,
+                    llantas REAL,
+                    aceite REAL,
+                    combustible REAL,
+                    galones_necesarios REAL,
+                    flypass REAL,
+                    peajes REAL,
+                    cruce_frontera REAL,
+                    hotel REAL,
+                    comida REAL,
+                    parqueo REAL,
+                    cargue_descargue REAL,
+                    otros REAL,
+                    total_gastos REAL,
+                    legalizacion REAL,
+                    punto_equilibrio REAL,
+                    valor_flete REAL,
+                    utilidad REAL,
+                    rentabilidad REAL,
+                    anticipo REAL,
+                    saldo REAL,
+                    hubo_anticipo_empresa INTEGER,
+                    ant_empresa REAL,
+                    saldo_empresa REAL,
+                    observaciones TEXT
+                )
+            ''')
 
-        # Tabla de tractomulas (simplificada)
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS tractomulas (
-                id SERIAL PRIMARY KEY,
-                placa TEXT UNIQUE NOT NULL,
-                consumo_km_galon REAL NOT NULL,
-                tipo TEXT NOT NULL
-            )
-        ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS tractomulas (
+                    id SERIAL PRIMARY KEY,
+                    placa TEXT UNIQUE NOT NULL,
+                    consumo_km_galon REAL NOT NULL,
+                    tipo TEXT NOT NULL
+                )
+            ''')
 
-        # Tabla de conductores (simplificada)
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS conductores (
-                id SERIAL PRIMARY KEY,
-                nombre TEXT UNIQUE NOT NULL,
-                cedula TEXT NOT NULL
-            )
-        ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS conductores (
+                    id SERIAL PRIMARY KEY,
+                    nombre TEXT UNIQUE NOT NULL,
+                    cedula TEXT NOT NULL
+                )
+            ''')
 
-        # Tabla de rutas con nuevos campos: es_regional, es_aguachica
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS rutas (
-                id SERIAL PRIMARY KEY,
-                origen TEXT NOT NULL,
-                destino TEXT NOT NULL,
-                distancia_km REAL NOT NULL,
-                es_frontera INTEGER NOT NULL,
-                es_regional INTEGER NOT NULL,
-                es_aguachica INTEGER NOT NULL
-            )
-        ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS rutas (
+                    id SERIAL PRIMARY KEY,
+                    origen TEXT NOT NULL,
+                    destino TEXT NOT NULL,
+                    distancia_km REAL NOT NULL,
+                    es_frontera INTEGER NOT NULL,
+                    es_regional INTEGER NOT NULL,
+                    es_aguachica INTEGER NOT NULL
+                )
+            ''')
 
-        conn.commit()
-        conn.close()
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            st.error(f"Error inicializando base de datos: {e}")
 
     def guardar_viaje(self, calculadora, observaciones=""):
-        """Guarda un viaje en la base de datos"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        costos = calculadora.calcular_costos_totales()
-        fecha_actual = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        """Guarda un viaje en la base de datos de manera segura"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            costos = calculadora.calcular_costos_totales()
+            fecha_actual = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        # Hemos contado exactamente 39 columnas y ahora pondremos exactamente 39 %s
-        cursor.execute('''
-            INSERT INTO viajes (
-                fecha_creacion, placa, conductor, origen, destino, distancia_km,
-                dias_viaje, es_frontera, hubo_parqueo, nomina_admin, nomina_conductor,
-                comision_conductor, mantenimiento, seguros, tecnomecanica, llantas,
-                aceite, combustible, galones_necesarios, flypass, peajes,
-                cruce_frontera, hotel, comida, parqueo, cargue_descargue, otros,
-                total_gastos, legalizacion, punto_equilibrio, valor_flete,
-                utilidad, rentabilidad, anticipo, saldo, hubo_anticipo_empresa,
-                ant_empresa, saldo_empresa, observaciones
-            ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
-                %s, %s, %s, %s, %s, %s, %s, %s, %s
-            ) RETURNING id
-        ''', (
-            fecha_actual,
-            calculadora.tractomula.placa,
-            calculadora.conductor.nombre,
-            calculadora.ruta.origen,
-            calculadora.ruta.destino,
-            calculadora.ruta.distancia_km,
-            calculadora.dias_viaje,
-            1 if calculadora.es_frontera else 0,
-            1 if calculadora.hubo_parqueo else 0,
-            costos['nomina_admin'],
-            costos['nomina_conductor'],
-            costos['comision_conductor'],
-            costos['mantenimiento'],
-            costos['seguros'],
-            costos['tecnomecanica'],
-            costos['llantas'],
-            costos['aceite'],
-            costos['combustible'],
-            costos['galones_necesarios'],
-            calculadora.flypass,
-            calculadora.peajes,
-            costos['cruce_frontera'],
-            calculadora.hotel,
-            calculadora.comida,
-            costos['parqueo'],
-            calculadora.cargue_descargue,
-            calculadora.otros,
-            costos['total_gastos'],
-            costos['legalizacion'],
-            costos['punto_equilibrio'],
-            calculadora.valor_flete,
-            costos['utilidad'],
-            costos['rentabilidad'],
-            calculadora.anticipo,
-            costos['saldo'],
-            1 if calculadora.hubo_anticipo_empresa else 0,
-            costos['ant_empresa'],
-            costos['saldo_empresa'],
-            observaciones
-        ))
+            cursor.execute('''
+                INSERT INTO viajes_v4 (
+                    fecha_creacion, placa, conductor, origen, destino, distancia_km,
+                    dias_viaje, es_frontera, hubo_parqueo, nomina_admin, nomina_conductor,
+                    comision_conductor, mantenimiento, seguros, tecnomecanica, llantas,
+                    aceite, combustible, galones_necesarios, flypass, peajes,
+                    cruce_frontera, hotel, comida, parqueo, cargue_descargue, otros,
+                    total_gastos, legalizacion, punto_equilibrio, valor_flete,
+                    utilidad, rentabilidad, anticipo, saldo, hubo_anticipo_empresa,
+                    ant_empresa, saldo_empresa, observaciones
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s
+                ) RETURNING id
+            ''', (
+                fecha_actual,
+                str(calculadora.tractomula.placa),
+                str(calculadora.conductor.nombre),
+                str(calculadora.ruta.origen),
+                str(calculadora.ruta.destino),
+                float(calculadora.ruta.distancia_km),
+                int(calculadora.dias_viaje),
+                1 if calculadora.es_frontera else 0,
+                1 if calculadora.hubo_parqueo else 0,
+                costos['nomina_admin'],
+                costos['nomina_conductor'],
+                costos['comision_conductor'],
+                costos['mantenimiento'],
+                costos['seguros'],
+                costos['tecnomecanica'],
+                costos['llantas'],
+                costos['aceite'],
+                costos['combustible'],
+                costos['galones_necesarios'],
+                float(calculadora.flypass),
+                float(calculadora.peajes),
+                costos['cruce_frontera'],
+                float(calculadora.hotel),
+                float(calculadora.comida),
+                costos['parqueo'],
+                float(calculadora.cargue_descargue),
+                float(calculadora.otros),
+                costos['total_gastos'],
+                costos['legalizacion'],
+                costos['punto_equilibrio'],
+                float(calculadora.valor_flete),
+                costos['utilidad'],
+                costos['rentabilidad'],
+                float(calculadora.anticipo),
+                costos['saldo'],
+                1 if calculadora.hubo_anticipo_empresa else 0,
+                costos['ant_empresa'],
+                costos['saldo_empresa'],
+                str(observaciones)
+            ))
 
-        # Obtener el ID generado
-        viaje_id = cursor.fetchone()[0]
+            # CORRECCIÓN DEL ERROR: Verificar si retornó ID
+            result = cursor.fetchone()
+            if result:
+                viaje_id = result[0]
+            else:
+                viaje_id = None
+                st.warning("El viaje se guardó pero no se pudo recuperar el ID.")
 
-        conn.commit()
-        conn.close()
-        return viaje_id
+            conn.commit()
+            conn.close()
+            return viaje_id
+
+        except Exception as e:
+            st.error(f"❌ Error al guardar en base de datos: {e}")
+            return None
 
     def obtener_todos_viajes(self):
-        """Obtiene todos los viajes ordenados por fecha"""
         conn = self.get_connection()
-        query = "SELECT * FROM viajes ORDER BY fecha_creacion DESC"
+        query = "SELECT * FROM viajes_v4 ORDER BY fecha_creacion DESC"
         df = pd.read_sql_query(query, conn)
         conn.close()
         return df
 
     def buscar_viajes(self, fecha_inicio=None, fecha_fin=None, placa=None, conductor=None, origen=None, destino=None):
-        """Busca viajes con filtros"""
         conn = self.get_connection()
-        query = "SELECT * FROM viajes WHERE 1=1"
+        query = "SELECT * FROM viajes_v4 WHERE 1=1"
         params = []
         if fecha_inicio:
             query += " AND to_date(fecha_creacion, 'YYYY-MM-DD') >= %s"
@@ -280,128 +257,136 @@ class DatabaseManager:
         return df
 
     def obtener_viaje_por_id(self, viaje_id):
-        """Obtiene un viaje específico por ID"""
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM viajes WHERE id = %s", (viaje_id,))
+        cursor.execute("SELECT * FROM viajes_v4 WHERE id = %s", (viaje_id,))
         viaje = cursor.fetchone()
         conn.close()
         return viaje
 
     def eliminar_viaje(self, viaje_id):
-        """Elimina un viaje por ID"""
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM viajes WHERE id = %s", (viaje_id,))
+        cursor.execute("DELETE FROM viajes_v4 WHERE id = %s", (viaje_id,))
         conn.commit()
         conn.close()
 
     def obtener_estadisticas(self):
-        """Obtiene estadísticas generales"""
         conn = self.get_connection()
         cursor = conn.cursor()
         stats = {}
-        cursor.execute("SELECT COUNT(*) FROM viajes")
-        stats['total_viajes'] = cursor.fetchone()[0]
-        cursor.execute("SELECT SUM(distancia_km) FROM viajes")
-        stats['total_km'] = cursor.fetchone()[0] or 0
-        cursor.execute("SELECT SUM(total_gastos) FROM viajes")
-        stats['total_gastos'] = cursor.fetchone()[0] or 0
-        cursor.execute("SELECT placa, COUNT(*) as total FROM viajes GROUP BY placa ORDER BY total DESC")
-        stats['viajes_por_placa'] = cursor.fetchall()
-        cursor.execute("SELECT conductor, COUNT(*) as total FROM viajes GROUP BY conductor ORDER BY total DESC")
-        stats['viajes_por_conductor'] = cursor.fetchall()
-        cursor.execute("SELECT origen, destino, COUNT(*) as total FROM viajes GROUP BY origen, destino ORDER BY total DESC LIMIT 5")
-        stats['rutas_frecuentes'] = cursor.fetchall()
+        try:
+            cursor.execute("SELECT COUNT(*) FROM viajes_v4")
+            stats['total_viajes'] = cursor.fetchone()[0]
+            cursor.execute("SELECT SUM(distancia_km) FROM viajes_v4")
+            stats['total_km'] = cursor.fetchone()[0] or 0
+            cursor.execute("SELECT SUM(total_gastos) FROM viajes_v4")
+            stats['total_gastos'] = cursor.fetchone()[0] or 0
+            cursor.execute("SELECT placa, COUNT(*) as total FROM viajes_v4 GROUP BY placa ORDER BY total DESC")
+            stats['viajes_por_placa'] = cursor.fetchall()
+            cursor.execute("SELECT conductor, COUNT(*) as total FROM viajes_v4 GROUP BY conductor ORDER BY total DESC")
+            stats['viajes_por_conductor'] = cursor.fetchall()
+            cursor.execute("SELECT origen, destino, COUNT(*) as total FROM viajes_v4 GROUP BY origen, destino ORDER BY total DESC LIMIT 5")
+            stats['rutas_frecuentes'] = cursor.fetchall()
+        except Exception:
+            stats = {'total_viajes': 0, 'total_km': 0, 'total_gastos': 0, 'viajes_por_placa': [], 'viajes_por_conductor': [], 'rutas_frecuentes': []}
         conn.close()
         return stats
 
     def obtener_dashboard_data(self):
-        """Obtiene datos para el dashboard"""
         conn = self.get_connection()
         cursor = conn.cursor()
         hoy = datetime.now()
         inicio_mes = hoy.replace(day=1).strftime('%Y-%m-%d')
         data = {}
 
-        cursor.execute("""
-            SELECT COUNT(*) as total_viajes, SUM(distancia_km) as total_km,
-                   SUM(total_gastos) as total_gastos, SUM(valor_flete) as total_ingresos,
-                   SUM(utilidad) as total_utilidad, AVG(utilidad) as utilidad_promedio
-            FROM viajes
-            WHERE to_date(fecha_creacion, 'YYYY-MM-DD') >= %s
-        """, (inicio_mes,))
-        row = cursor.fetchone()
-        data['mes_actual'] = {
-            'total_viajes': row[0] or 0,
-            'total_km': row[1] or 0,
-            'total_gastos': row[2] or 0,
-            'total_ingresos': row[3] or 0,
-            'total_utilidad': row[4] or 0,
-            'utilidad_promedio': row[5] or 0
-        }
+        try:
+            cursor.execute("""
+                SELECT COUNT(*) as total_viajes, SUM(distancia_km) as total_km,
+                       SUM(total_gastos) as total_gastos, SUM(valor_flete) as total_ingresos,
+                       SUM(utilidad) as total_utilidad, AVG(utilidad) as utilidad_promedio
+                FROM viajes_v4
+                WHERE to_date(fecha_creacion, 'YYYY-MM-DD') >= %s
+            """, (inicio_mes,))
+            row = cursor.fetchone()
+            data['mes_actual'] = {
+                'total_viajes': row[0] or 0,
+                'total_km': row[1] or 0,
+                'total_gastos': row[2] or 0,
+                'total_ingresos': row[3] or 0,
+                'total_utilidad': row[4] or 0,
+                'utilidad_promedio': row[5] or 0
+            }
 
-        cursor.execute("""
-            SELECT placa, COUNT(*) as viajes, SUM(total_gastos) as gastos,
-                   SUM(valor_flete) as ingresos, SUM(utilidad) as utilidad
-            FROM viajes
-            WHERE to_date(fecha_creacion, 'YYYY-MM-DD') >= %s
-            GROUP BY placa ORDER BY utilidad DESC
-        """, (inicio_mes,))
-        data['por_tractomula'] = cursor.fetchall()
+            cursor.execute("""
+                SELECT placa, COUNT(*) as viajes, SUM(total_gastos) as gastos,
+                       SUM(valor_flete) as ingresos, SUM(utilidad) as utilidad
+                FROM viajes_v4
+                WHERE to_date(fecha_creacion, 'YYYY-MM-DD') >= %s
+                GROUP BY placa ORDER BY utilidad DESC
+            """, (inicio_mes,))
+            data['por_tractomula'] = cursor.fetchall()
 
-        cursor.execute("""
-            SELECT conductor, COUNT(*) as viajes, SUM(utilidad) as utilidad,
-                   AVG(utilidad) as utilidad_promedio
-            FROM viajes
-            WHERE to_date(fecha_creacion, 'YYYY-MM-DD') >= %s
-            GROUP BY conductor ORDER BY utilidad DESC
-        """, (inicio_mes,))
-        data['por_conductor'] = cursor.fetchall()
+            cursor.execute("""
+                SELECT conductor, COUNT(*) as viajes, SUM(utilidad) as utilidad,
+                       AVG(utilidad) as utilidad_promedio
+                FROM viajes_v4
+                WHERE to_date(fecha_creacion, 'YYYY-MM-DD') >= %s
+                GROUP BY conductor ORDER BY utilidad DESC
+            """, (inicio_mes,))
+            data['por_conductor'] = cursor.fetchall()
 
-        cursor.execute("""
-            SELECT origen, destino, COUNT(*) as viajes, AVG(utilidad) as utilidad_promedio,
-                   SUM(utilidad) as utilidad_total
-            FROM viajes
-            WHERE to_date(fecha_creacion, 'YYYY-MM-DD') >= %s
-            GROUP BY origen, destino ORDER BY utilidad_total DESC LIMIT 5
-        """, (inicio_mes,))
-        data['rutas_rentables'] = cursor.fetchall()
+            cursor.execute("""
+                SELECT origen, destino, COUNT(*) as viajes, AVG(utilidad) as utilidad_promedio,
+                       SUM(utilidad) as utilidad_total
+                FROM viajes_v4
+                WHERE to_date(fecha_creacion, 'YYYY-MM-DD') >= %s
+                GROUP BY origen, destino ORDER BY utilidad_total DESC LIMIT 5
+            """, (inicio_mes,))
+            data['rutas_rentables'] = cursor.fetchall()
 
-        cursor.execute("""
-            SELECT to_char(to_date(fecha_creacion, 'YYYY-MM-DD'), 'YYYY-MM') as mes,
-                   COUNT(*) as viajes, SUM(total_gastos) as gastos,
-                   SUM(valor_flete) as ingresos, SUM(utilidad) as utilidad
-            FROM viajes
-            WHERE to_date(fecha_creacion, 'YYYY-MM-DD') >= CURRENT_DATE - INTERVAL '6 months'
-            GROUP BY mes ORDER BY mes
-        """)
-        data['evolucion_6_meses'] = cursor.fetchall()
+            cursor.execute("""
+                SELECT to_char(to_date(fecha_creacion, 'YYYY-MM-DD'), 'YYYY-MM') as mes,
+                       COUNT(*) as viajes, SUM(total_gastos) as gastos,
+                       SUM(valor_flete) as ingresos, SUM(utilidad) as utilidad
+                FROM viajes_v4
+                WHERE to_date(fecha_creacion, 'YYYY-MM-DD') >= CURRENT_DATE - INTERVAL '6 months'
+                GROUP BY mes ORDER BY mes
+            """)
+            data['evolucion_6_meses'] = cursor.fetchall()
 
-        cursor.execute("""
-            SELECT fecha_creacion, placa, origen, destino, total_gastos, valor_flete, utilidad
-            FROM viajes WHERE utilidad < 0 ORDER BY fecha_creacion DESC LIMIT 10
-        """)
-        data['viajes_no_rentables'] = cursor.fetchall()
+            cursor.execute("""
+                SELECT fecha_creacion, placa, origen, destino, total_gastos, valor_flete, utilidad
+                FROM viajes_v4 WHERE utilidad < 0 ORDER BY fecha_creacion DESC LIMIT 10
+            """)
+            data['viajes_no_rentables'] = cursor.fetchall()
 
-        # Nuevas métricas para UT BRUTA, UT NETA, % UT
-        cursor.execute("""
-            SELECT SUM(valor_flete) as ut_bruta, SUM(utilidad) as ut_neta
-            FROM viajes WHERE to_date(fecha_creacion, 'YYYY-MM-DD') >= %s
-        """, (inicio_mes,))
-        row_ut = cursor.fetchone()
-        ut_bruta = row_ut[0] or 0
-        ut_neta = row_ut[1] or 0
-        porcentaje_ut = (ut_neta / ut_bruta * 100) if ut_bruta > 0 else 0
-        data['ut_bruta'] = ut_bruta
-        data['ut_neta'] = ut_neta
-        data['porcentaje_ut'] = porcentaje_ut
+            cursor.execute("""
+                SELECT SUM(valor_flete) as ut_bruta, SUM(utilidad) as ut_neta
+                FROM viajes_v4 WHERE to_date(fecha_creacion, 'YYYY-MM-DD') >= %s
+            """, (inicio_mes,))
+            row_ut = cursor.fetchone()
+            ut_bruta = row_ut[0] or 0
+            ut_neta = row_ut[1] or 0
+            porcentaje_ut = (ut_neta / ut_bruta * 100) if ut_bruta > 0 else 0
+            data['ut_bruta'] = ut_bruta
+            data['ut_neta'] = ut_neta
+            data['porcentaje_ut'] = porcentaje_ut
+            
+        except Exception:
+            # En caso de error (tabla vacía o no existe), retornar valores en cero
+            data = {k: 0 for k in ['ut_bruta', 'ut_neta', 'porcentaje_ut']}
+            data['mes_actual'] = {k: 0 for k in ['total_viajes', 'total_km', 'total_gastos', 'total_ingresos', 'total_utilidad', 'utilidad_promedio']}
+            data['por_tractomula'] = []
+            data['por_conductor'] = []
+            data['rutas_rentables'] = []
+            data['evolucion_6_meses'] = []
+            data['viajes_no_rentables'] = []
 
         conn.close()
         return data
 
     def obtener_totales_por_placa(self, fecha_inicio=None, fecha_fin=None):
-        """Obtiene totales acumulados por placa con filtros de fecha"""
         conn = self.get_connection()
         query = """
             SELECT placa, SUM(valor_flete) as total_cxc, SUM(nomina_admin) as total_admin,
@@ -416,7 +401,7 @@ class DatabaseManager:
                    SUM(legalizacion) as total_legalizacion, SUM(anticipo) as total_anticipo,
                    SUM(saldo) as total_saldo, SUM(ant_empresa) as total_ant_empresa,
                    SUM(saldo_empresa) as total_saldo_empresa
-            FROM viajes WHERE 1=1
+            FROM viajes_v4 WHERE 1=1
         """
         params = []
         if fecha_inicio:
@@ -427,40 +412,38 @@ class DatabaseManager:
             params.append(fecha_fin)
         query += " GROUP BY placa ORDER BY placa"
 
-        df = pd.read_sql_query(query, conn, params=params)
+        try:
+            df = pd.read_sql_query(query, conn, params=params)
+            # Calcular compuestos
+            if not df.empty:
+                df['total_gastos'] = (
+                    df['total_admin'] + df['total_parafiscales'] + df['total_comision'] +
+                    df['total_mantenimiento'] + df['total_seguros'] + df['total_tecnomecanica'] +
+                    df['total_llantas'] + df['total_aceite'] + df['total_combustible'] +
+                    df['total_flypass'] + df['total_peajes'] + df['total_cruce_frontera'] +
+                    df['total_hotel'] + df['total_comida'] + df['total_parqueo'] +
+                    df['total_cargue_descargue'] + df['total_otros']
+                )
+                df['total_punto_equilibrio'] = df['total_gastos'] / 0.5
+                df['total_ut'] = df['total_cxc'] - df['total_gastos']
+                df['total_rentabilidad'] = (df['total_ut'] / df['total_cxc'] * 100).where(df['total_cxc'] != 0, 0)
+        except Exception:
+            df = pd.DataFrame()
+            
         conn.close()
-
-        # Calcular compuestos
-        if not df.empty:
-            df['total_gastos'] = (
-                df['total_admin'] + df['total_parafiscales'] + df['total_comision'] +
-                df['total_mantenimiento'] + df['total_seguros'] + df['total_tecnomecanica'] +
-                df['total_llantas'] + df['total_aceite'] + df['total_combustible'] +
-                df['total_flypass'] + df['total_peajes'] + df['total_cruce_frontera'] +
-                df['total_hotel'] + df['total_comida'] + df['total_parqueo'] +
-                df['total_cargue_descargue'] + df['total_otros']
-            )
-            df['total_punto_equilibrio'] = df['total_gastos'] / 0.5
-            df['total_ut'] = df['total_cxc'] - df['total_gastos']
-            df['total_rentabilidad'] = (df['total_ut'] / df['total_cxc'] * 100).where(df['total_cxc'] != 0, 0)
-
         return df
 
-    # Métodos para tractomulas
-    def guardar_tractomula(self, tractomula: 'Tractomula'):
+    # Métodos para tractomulas, conductores y rutas (sin cambios mayores)
+    def guardar_tractomula(self, tractomula):
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute('''
-                INSERT INTO tractomulas (placa, consumo_km_galon, tipo)
-                VALUES (%s, %s, %s)
-            ''', (tractomula.placa, tractomula.consumo_km_galon, tractomula.tipo))
+            cursor.execute('INSERT INTO tractomulas (placa, consumo_km_galon, tipo) VALUES (%s, %s, %s)',
+                         (tractomula.placa, tractomula.consumo_km_galon, tractomula.tipo))
             conn.commit()
             return True
-        except Exception:
-            return False
-        finally:
-            conn.close()
+        except Exception: return False
+        finally: conn.close()
 
     def obtener_tractomulas(self):
         conn = self.get_connection()
@@ -468,11 +451,7 @@ class DatabaseManager:
         cursor.execute("SELECT * FROM tractomulas ORDER BY placa")
         tractomulas = []
         for row in cursor.fetchall():
-            tractomulas.append(Tractomula(
-                placa=row[1],
-                consumo_km_galon=row[2],
-                tipo=row[3]
-            ))
+            tractomulas.append(Tractomula(placa=row[1], consumo_km_galon=row[2], tipo=row[3]))
         conn.close()
         return tractomulas
 
@@ -483,21 +462,16 @@ class DatabaseManager:
         conn.commit()
         conn.close()
 
-    # Métodos para conductores
-    def guardar_conductor(self, conductor: 'Conductor'):
+    def guardar_conductor(self, conductor):
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute('''
-                INSERT INTO conductores (nombre, cedula)
-                VALUES (%s, %s)
-            ''', (conductor.nombre, conductor.cedula))
+            cursor.execute('INSERT INTO conductores (nombre, cedula) VALUES (%s, %s)',
+                         (conductor.nombre, conductor.cedula))
             conn.commit()
             return True
-        except Exception:
-            return False
-        finally:
-            conn.close()
+        except Exception: return False
+        finally: conn.close()
 
     def obtener_conductores(self):
         conn = self.get_connection()
@@ -516,29 +490,17 @@ class DatabaseManager:
         conn.commit()
         conn.close()
 
-    # Métodos para rutas
-    def guardar_ruta(self, ruta: 'Ruta'):
+    def guardar_ruta(self, ruta):
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO rutas (origen, destino, distancia_km, es_frontera, es_regional, es_aguachica)
             VALUES (%s, %s, %s, %s, %s, %s)
-        ''', (
-            ruta.origen, ruta.destino, ruta.distancia_km,
-            1 if ruta.es_frontera else 0,
-            1 if ruta.es_regional else 0,
-            1 if ruta.es_aguachica else 0
-        ))
+        ''', (ruta.origen, ruta.destino, ruta.distancia_km, 1 if ruta.es_frontera else 0,
+              1 if ruta.es_regional else 0, 1 if ruta.es_aguachica else 0))
         conn.commit()
-        # Intentar obtener el ID insertado
-        try:
-            ruta_id = cursor.fetchone()[0]
-        except:
-            # Fallback
-            try:
-                ruta_id = cursor.lastrowid
-            except:
-                ruta_id = None
+        try: ruta_id = cursor.fetchone()[0]
+        except: ruta_id = cursor.lastrowid
         conn.close()
         return ruta_id
 
@@ -548,14 +510,10 @@ class DatabaseManager:
         cursor.execute("SELECT * FROM rutas ORDER BY origen, destino")
         rutas = []
         for row in cursor.fetchall():
-            rutas.append(Ruta(
-                origen=row[1],
-                destino=row[2],
-                distancia_km=row[3],
-                es_frontera=bool(row[4]),
-                es_regional=bool(row[5]) if len(row) > 5 else False,
-                es_aguachica=bool(row[6]) if len(row) > 6 else False
-            ))
+            rutas.append(Ruta(origen=row[1], destino=row[2], distancia_km=row[3],
+                            es_frontera=bool(row[4]),
+                            es_regional=bool(row[5]) if len(row) > 5 else False,
+                            es_aguachica=bool(row[6]) if len(row) > 6 else False))
         conn.close()
         return rutas
 
