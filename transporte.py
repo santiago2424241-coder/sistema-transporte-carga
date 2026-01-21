@@ -1,3 +1,4 @@
+
 """
 Sistema de Programación de Rutas y Cálculo de Costos para Tractomulas
 Versión 3.3 - Conectado a Supabase (PostgreSQL) - ACTUALIZADO
@@ -1943,4 +1944,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
