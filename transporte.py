@@ -531,8 +531,6 @@ class Tractomula:
     placa: str
     consumo_km_galon: float
     tipo: str
-
-
 @dataclass
 class Conductor:
     nombre: str
