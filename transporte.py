@@ -177,7 +177,7 @@ class DatabaseManager:
         costos = calculadora.calcular_costos_totales()
         fecha_actual = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        # CORRECCIÓN CRÍTICA: Asegurar que RETURNING id esté presente
+        # Hemos contado exactamente 39 columnas y ahora pondremos exactamente 39 %s
         cursor.execute('''
             INSERT INTO viajes (
                 fecha_creacion, placa, conductor, origen, destino, distancia_km,
@@ -188,9 +188,12 @@ class DatabaseManager:
                 total_gastos, legalizacion, punto_equilibrio, valor_flete,
                 utilidad, rentabilidad, anticipo, saldo, hubo_anticipo_empresa,
                 ant_empresa, saldo_empresa, observaciones
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                   %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                   %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
+                %s, %s, %s, %s, %s, %s, %s, %s, %s
+            ) RETURNING id
         ''', (
             fecha_actual,
             calculadora.tractomula.placa,
@@ -233,16 +236,8 @@ class DatabaseManager:
             observaciones
         ))
 
-        # Obtener el ID generado por RETURNING id
-        try:
-            viaje_id = cursor.fetchone()[0]
-        except Exception:
-            # Fallback por si el driver no lo soporta
-            try:
-                # En psycopg2 puro, a veces se puede usar esto si no se usó RETURNING id
-                viaje_id = cursor.lastrowid
-            except:
-                viaje_id = None
+        # Obtener el ID generado
+        viaje_id = cursor.fetchone()[0]
 
         conn.commit()
         conn.close()
