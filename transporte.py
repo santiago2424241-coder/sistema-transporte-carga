@@ -172,17 +172,21 @@ class DatabaseManager:
             st.error(f"Error inicializando base de datos: {e}")
 
     def guardar_viaje(self, calculadora, observaciones=""):
-        """Guarda un viaje en la base de datos de forma segura"""
+        """Guarda un viaje en la base de datos de forma segura con HORA COLOMBIA"""
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
             costos = calculadora.calcular_costos_totales()
-            fecha_actual = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            # --- CORRECCIÓN DE HORA ---
+            # El servidor está en UTC, así que restamos 5 horas para tener hora Colombia
+            hora_colombia = datetime.now() - timedelta(hours=5)
+            fecha_actual = hora_colombia.strftime('%Y-%m-%d %H:%M:%S')
+            # --------------------------
 
             # 1. Preparamos los datos en una tupla ordenada (39 elementos)
-            # Esto evita el error "tuple index out of range"
             datos_viaje = (
-                fecha_actual,                                   # 1
+                fecha_actual,                                   # 1 (FECHA CORREGIDA)
                 str(calculadora.tractomula.placa),              # 2
                 str(calculadora.conductor.nombre),              # 3
                 str(calculadora.ruta.origen),                   # 4
@@ -223,7 +227,7 @@ class DatabaseManager:
                 str(observaciones)                              # 39
             )
 
-            # 2. Ejecutamos la consulta con exactamente 39 placeholders (%s)
+            # 2. Ejecutamos la consulta
             sql_insert = '''
                 INSERT INTO viajes_v4 (
                     fecha_creacion, placa, conductor, origen, destino, distancia_km,
@@ -244,7 +248,6 @@ class DatabaseManager:
 
             cursor.execute(sql_insert, datos_viaje)
 
-            # Obtener el ID generado
             result = cursor.fetchone()
             if result:
                 viaje_id = result[0]
@@ -258,11 +261,6 @@ class DatabaseManager:
 
         except Exception as e:
             st.error(f"❌ Error detallado al guardar: {e}")
-            # Esto imprimirá en pantalla si hay un desajuste de datos
-            try:
-                st.write(f"Datos preparados: {len(datos_viaje)} items")
-            except:
-                pass
             return None
 
     def obtener_todos_viajes(self):
