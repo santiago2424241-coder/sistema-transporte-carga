@@ -7,14 +7,12 @@ Autor: Sistema de Gestión de Transporte de Carga
 """
 
 import streamlit as st
-import json
 import re
 import psycopg2
 from psycopg2 import sql
 from datetime import datetime, timedelta
-from dataclasses import dataclass, asdict
-from typing import List, Dict, Tuple
-import math
+from dataclasses import dataclass
+from typing import List, Dict
 import io
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -179,7 +177,7 @@ class DatabaseManager:
         costos = calculadora.calcular_costos_totales()
         fecha_actual = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        # Aseguramos que coincidan exactamente columnas y marcadores (39 items)
+        # CORRECCIÓN CRÍTICA: Asegurar que RETURNING id esté presente
         cursor.execute('''
             INSERT INTO viajes (
                 fecha_creacion, placa, conductor, origen, destino, distancia_km,
@@ -190,9 +188,9 @@ class DatabaseManager:
                 total_gastos, legalizacion, punto_equilibrio, valor_flete,
                 utilidad, rentabilidad, anticipo, saldo, hubo_anticipo_empresa,
                 ant_empresa, saldo_empresa, observaciones
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                       %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                       %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                   %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                   %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ''', (
             fecha_actual,
             calculadora.tractomula.placa,
@@ -235,12 +233,18 @@ class DatabaseManager:
             observaciones
         ))
 
-        conn.commit()
-        # Intentar obtener el ID insertado (método compatible)
+        # Obtener el ID generado por RETURNING id
         try:
             viaje_id = cursor.fetchone()[0]
-        except:
-            viaje_id = cursor.lastrowid
+        except Exception:
+            # Fallback por si el driver no lo soporta
+            try:
+                # En psycopg2 puro, a veces se puede usar esto si no se usó RETURNING id
+                viaje_id = cursor.lastrowid
+            except:
+                viaje_id = None
+
+        conn.commit()
         conn.close()
         return viaje_id
 
@@ -531,7 +535,15 @@ class DatabaseManager:
             1 if ruta.es_aguachica else 0
         ))
         conn.commit()
-        ruta_id = cursor.lastrowid
+        # Intentar obtener el ID insertado
+        try:
+            ruta_id = cursor.fetchone()[0]
+        except:
+            # Fallback
+            try:
+                ruta_id = cursor.lastrowid
+            except:
+                ruta_id = None
         conn.close()
         return ruta_id
 
@@ -586,7 +598,6 @@ class Ruta:
 
 # ==================== DATOS COLOMBIANOS ====================
 class DatosColombia:
-    """Datos del contexto colombiano para transporte de carga - Actualizados 2026"""
     PRECIO_DIESEL = 10800
     NOMINA_ADMIN_BASE = 1300000
     NOMINA_ADMIN_DIVISOR = 14
@@ -659,15 +670,12 @@ class CalculadoraCostos:
         self.datos = datos
 
     def calcular_nomina_admin(self) -> float:
-        """NOMINA ADMIN = (1,300,000 / 14) × días - ACTUALIZADO"""
         return (self.datos.NOMINA_ADMIN_BASE / self.datos.NOMINA_ADMIN_DIVISOR) * self.dias_viaje
 
     def calcular_nomina_conductor(self) -> float:
-        """NOMINA CONDUCTOR = 20,000 × días - ACTUALIZADO"""
         return self.datos.NOMINA_CONDUCTOR_DIA * self.dias_viaje
 
     def calcular_comision_conductor(self) -> float:
-        """COMISION CONDUCTOR - ACTUALIZADO"""
         if self.ruta.es_aguachica:
             return self.datos.COMISION_AGUACHICA
         elif self.ruta.es_regional:
@@ -678,11 +686,9 @@ class CalculadoraCostos:
             return self.datos.COMISION_NO_FRONTERA
 
     def calcular_mantenimiento(self) -> float:
-        """MANTENIMIENTO = (1,500,000 / 30) × días"""
         return (self.datos.MANTENIMIENTO_MENSUAL / 30) * self.dias_viaje
 
     def calcular_seguros(self) -> float:
-        """SEGUROS = ((1,400,000/365) + (6,000,000/365) + (16,000,000/14/365)) × días"""
         seguro_diario = (
             (self.datos.SEGURO_1 / 365) +
             (self.datos.SEGURO_2 / 365) +
@@ -691,57 +697,46 @@ class CalculadoraCostos:
         return seguro_diario * self.dias_viaje
 
     def calcular_tecnomecanica(self) -> float:
-        """TECNOMECANICA = (460,000 / 365) × días - ACTUALIZADO"""
         return (self.datos.TECNOMECANICA_ANUAL / 365) * self.dias_viaje
 
     def calcular_llantas(self) -> float:
-        """LLANTAS = (1,300,000 × 22 / 80,000) × km - ACTUALIZADO"""
         costo_por_km = (self.datos.LLANTAS_COSTO * self.datos.LLANTAS_CANTIDAD) / self.datos.LLANTAS_KM
         return costo_por_km * self.ruta.distancia_km
 
     def calcular_aceite(self) -> float:
-        """ACEITE = (2,500,000 / 15,000) × km"""
         costo_por_km = self.datos.ACEITE_COSTO / self.datos.ACEITE_KM
         return costo_por_km * self.ruta.distancia_km
 
     def calcular_galones_necesarios(self) -> float:
-        """Calcula galones necesarios"""
         if self.tractomula.consumo_km_galon <= 0:
             return 0.0
         return self.ruta.distancia_km / self.tractomula.consumo_km_galon
 
     def calcular_combustible(self) -> float:
-        """COMBUSTIBLE = (km / consumo_km_galon) × precio_diesel"""
         galones = self.calcular_galones_necesarios()
         return galones * self.datos.PRECIO_DIESEL
 
     def calcular_cruce_frontera(self) -> float:
-        """CRUCE FRONTERA = 556,000 (frontera) ó 0"""
         return self.datos.CRUCE_FRONTERA if self.es_frontera else 0
 
     def calcular_parqueo(self) -> float:
-        """PARQUEO = 15,000 × días (si hubo) ó 0"""
         return self.datos.PARQUEO_DIA * self.dias_viaje if self.hubo_parqueo else 0
 
     def calcular_legalizacion(self) -> float:
-        """LEGALIZACION = suma de PEAJES + CRUCE FRONTERA + HOTEL + COMIDA + PARQUEO + CARGUE DESCARGUE + OTROS"""
         return (self.peajes + self.calcular_cruce_frontera() + self.hotel +
                 self.comida + self.calcular_parqueo() + self.cargue_descargue + self.otros)
 
     def calcular_saldo(self) -> float:
-        """SALDO = ANTICIPO - LEGALIZACION"""
         legalizacion = self.calcular_legalizacion()
         return self.anticipo - legalizacion
 
     def calcular_ant_empresa(self) -> float:
-        """ANT EMPRESA = VALOR FLETE × 0.90 (si hubo_anticipo_empresa)"""
         if self.hubo_anticipo_empresa:
             return self.valor_flete * self.datos.MARGEN_ANT_EMPRESA
         else:
             return 0.0
 
     def calcular_costos_totales(self) -> Dict[str, float]:
-        """Calcula todos los costos y resultados"""
         nomina_admin = self.calcular_nomina_admin()
         nomina_conductor = self.calcular_nomina_conductor()
         comision_conductor = self.calcular_comision_conductor()
@@ -954,6 +949,8 @@ Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                     cell.number_format = '$#,##0'
                 elif col == 13:
                     cell.number_format = '#,##0.0"%"'
+                else:
+                    cell.number_format = '#,##0'
 
             row += 1
 
@@ -1069,7 +1066,6 @@ Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
     @staticmethod
     def generar_excel_totales(df_totales: pd.DataFrame) -> io.BytesIO:
-        """Genera un archivo Excel para totales por placa"""
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df_totales.to_excel(writer, sheet_name='Totales por Flota', index=False)
@@ -1080,7 +1076,6 @@ Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 # ==================== COMPONENTE DE INPUT CON FORMATO ====================
 def input_numero(label, value=0.0, min_value=0.0, step=1000.0, key=None, help=None):
     """Input personalizado que acepta formato colombiano"""
-    # Mostrar el input como texto
     texto = st.text_input(
         label,
         value=formatear_numero(value) if value > 0 else "",
@@ -1089,10 +1084,8 @@ def input_numero(label, value=0.0, min_value=0.0, step=1000.0, key=None, help=No
         placeholder="0"
     )
 
-    # Convertir el texto a número
     numero = limpiar_numero(texto) if texto else 0.0
 
-    # Mostrar vista previa formateada debajo
     if numero > 0:
         st.caption(f"💵 {formatear_numero(numero)} COP")
 
@@ -1391,7 +1384,7 @@ def main():
 
         if st.session_state.rutas:
             st.subheader("Rutas Registradas")
-            conn = db.get_connection()
+            conn = st.session_state.db.get_connection()
             cursor = conn.cursor()
             cursor.execute("SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica FROM rutas ORDER BY origen, destino")
             rutas_con_id = cursor.fetchall()
@@ -1519,7 +1512,7 @@ def main():
                 col1, col2, col3 = st.columns(3)
                 with col1:
                     es_frontera = st.checkbox("¿Es viaje a frontera?", value=ruta_obj.es_frontera,
-                                            help="Afecta Comisión Conductor y Cruce Frontera")
+                                                help="Afecta Comisión Conductor y Cruce Frontera")
                     hubo_parqueo = st.checkbox("¿Hubo parqueo?", value=False)
                     hubo_anticipo_empresa = st.checkbox("¿Hubo anticipo empresa?", value=False,
                                                        help="Activa ANTICIPO EMPRESA = VALOR FLETE × 0.90")
@@ -1568,7 +1561,7 @@ def main():
                 st.subheader("💰 Valor del Flete")
 
                 valor_flete_texto = st.text_input(
-                    "💵 Valor del Flete Cobrado al Cliente (COP)",
+                    "💰 Valor del Flete Cobrado al Cliente (COP)",
                     value="",
                     placeholder="Ejemplo: 5.000.000",
                     help="¿Cuánto VAS A COBRAR o YA COBRASTE por este viaje?"
@@ -1600,7 +1593,7 @@ def main():
                     with col4:
                         st.metric("Punto Equilibrio", f"${formatear_numero(costos_preview['punto_equilibrio'])}")
 
-                observaciones = st.text_area("Observaciones (opcional)", placeholder="Notas sobre este viaje...")
+                    observaciones = st.text_area("Observaciones (opcional)", placeholder="Notas sobre este viaje...")
 
                 col_btn1, col_btn2 = st.columns(2)
                 with col_btn1:
@@ -1638,8 +1631,8 @@ def main():
                                 - Valor Flete: ${formatear_numero(calculadora.valor_flete)}
                                 - **Utilidad: ${formatear_numero(utilidad)}**
                                 - **Rentabilidad: {costos['rentabilidad']:.1f}%**
-                                - **Saldo: ${formatear_numero(costos['saldo'])}**
-                                """)
+                                - **Saldo: ${formatear_numero(costos['saldo'])}**")
+                            """)
                             else:
                                 st.error(f"""
                                 ⚠️ **Viaje guardado (ID: {viaje_id}) - PÉRDIDA DETECTADA**
@@ -1696,7 +1689,6 @@ def main():
             with col2:
                 fecha_fin = st.date_input("Fecha hasta", value=None)
                 conductor_filtro = st.text_input("Conductor (nombre)")
-
             with col3:
                 origen_filtro = st.text_input("Origen")
                 destino_filtro = st.text_input("Destino")
@@ -1779,7 +1771,7 @@ def main():
                         st.write(f"**Punto Equilibrio:** ${formatear_numero(viaje[30])}")
                         st.write(f"**Valor Flete:** ${formatear_numero(viaje[31])}")
 
-                        # CORRECCIÓN CRÍTICA AQUÍ
+                        # CORRECCIÓN: Manejo de None para utilidad y rentabilidad
                         utilidad = viaje[32] if viaje[32] is not None else 0
                         rentabilidad = viaje[33] if viaje[33] is not None else 0
 
@@ -1806,6 +1798,17 @@ def main():
                         st.write(f"4. Mantenimiento: ${formatear_numero(viaje[13])}")
                         st.write(f"5. Seguros: ${formatear_numero(viaje[14])}")
                         st.write(f"6. Tecnomecánica: ${formatear_numero(viaje[15])}")
+                        st.write(f"7. Llantas: ${formatear_numero(viaje[16])}")
+                        st.write(f"8. Aceite: ${formatear_numero(viaje[17])}")
+                        st.write(f"9. Combustible: ${formatear_numero(viaje[18])}")
+                        st.write(f"10. Flypass: ${formatear_numero(viaje[20])}")
+                        st.write(f"11. Peajes: ${formatear_numero(viaje[21])}")
+                        st.write(f"12. Cruce Frontera: ${formatear_numero(viaje[22])}")
+                        st.write(f"13. Hotel: ${formatear_numero(viaje[23])}")
+                        st.write(f"14. Comida: ${formatear_numero(viaje[24])}")
+                        st.write(f"15. Parqueo: ${formatear_numero(viaje[25])}")
+                        st.write(f"16. Cargue/Descargue: ${formatear_numero(viaje[26])}")
+                        st.write(f"17. Otros: ${formatear_numero(viaje[27])}")
 
                     with col2:
                         st.write(f"7. Llantas: ${formatear_numero(viaje[16])}")
@@ -1818,7 +1821,7 @@ def main():
                     with col3:
                         st.write(f"12. Cruce Frontera: ${formatear_numero(viaje[22])}")
                         st.write(f"13. Hotel: ${formatear_numero(viaje[23])}")
-                        st.write(f"14. Comida: {formatear_numero(viaje[24])}")
+                        st.write(f"14. Comida: ${formatear_numero(viaje[24])}")
                         st.write(f"15. Parqueo: ${formatear_numero(viaje[25])}")
                         st.write(f"16. Cargue/Descargue: ${formatear_numero(viaje[26])}")
                         st.write(f"17. Otros: ${formatear_numero(viaje[27])}")
@@ -1875,7 +1878,7 @@ def main():
                 st.info("No hay datos")
 
         if stats['rutas_frecuentes']:
-            st.markdown("### 🗺️ Rutas Más Frecuentes")
+            st.markdown("### Rutas Más Frecuentes")
             rutas_df = pd.DataFrame(stats['rutas_frecuentes'], columns=['Origen', 'Destino', 'Cantidad'])
             st.dataframe(rutas_df, use_container_width=True, hide_index=True)
 
@@ -1944,7 +1947,6 @@ def main():
             st.plotly_chart(fig_ut)
             fig_rentabilidad = px.bar(df_totales, x='placa', y='total_rentabilidad', title="Rentabilidad por Unidad")
             st.plotly_chart(fig_rentabilidad)
-
 
 if __name__ == "__main__":
     main()
