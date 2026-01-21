@@ -71,7 +71,7 @@ def limpiar_numero(texto):
         return 0.0
 
 
-# ==================== BASE DE DATOS SUPABASE (CORREGIDA) ====================
+# ==================== BASE DE DATOS SUPABASE (CORREGIDA V2) ====================
 class DatabaseManager:
     """Gestor de base de datos Supabase (PostgreSQL) para trazabilidad"""
 
@@ -88,8 +88,7 @@ class DatabaseManager:
             conn = self.get_connection()
             cursor = conn.cursor()
 
-            # NOTA: Cambiamos a 'viajes_v4' para asegurar que la tabla tenga todas las columnas nuevas
-            # y evitar el error IndexError por columnas faltantes
+            # Tabla Viajes v4 (Versión actualizada)
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS viajes_v4 (
                     id SERIAL PRIMARY KEY,
@@ -173,14 +172,59 @@ class DatabaseManager:
             st.error(f"Error inicializando base de datos: {e}")
 
     def guardar_viaje(self, calculadora, observaciones=""):
-        """Guarda un viaje en la base de datos"""
+        """Guarda un viaje en la base de datos de forma segura"""
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
             costos = calculadora.calcular_costos_totales()
             fecha_actual = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-            cursor.execute('''
+            # 1. Preparamos los datos en una tupla ordenada (39 elementos)
+            # Esto evita el error "tuple index out of range"
+            datos_viaje = (
+                fecha_actual,                                   # 1
+                str(calculadora.tractomula.placa),              # 2
+                str(calculadora.conductor.nombre),              # 3
+                str(calculadora.ruta.origen),                   # 4
+                str(calculadora.ruta.destino),                  # 5
+                float(calculadora.ruta.distancia_km),           # 6
+                int(calculadora.dias_viaje),                    # 7
+                1 if calculadora.es_frontera else 0,            # 8
+                1 if calculadora.hubo_parqueo else 0,           # 9
+                costos['nomina_admin'],                         # 10
+                costos['nomina_conductor'],                     # 11
+                costos['comision_conductor'],                   # 12
+                costos['mantenimiento'],                        # 13
+                costos['seguros'],                              # 14
+                costos['tecnomecanica'],                        # 15
+                costos['llantas'],                              # 16
+                costos['aceite'],                               # 17
+                costos['combustible'],                          # 18
+                costos['galones_necesarios'],                   # 19
+                float(calculadora.flypass),                     # 20
+                float(calculadora.peajes),                      # 21
+                costos['cruce_frontera'],                       # 22
+                float(calculadora.hotel),                       # 23
+                float(calculadora.comida),                      # 24
+                costos['parqueo'],                              # 25
+                float(calculadora.cargue_descargue),            # 26
+                float(calculadora.otros),                       # 27
+                costos['total_gastos'],                         # 28
+                costos['legalizacion'],                         # 29
+                costos['punto_equilibrio'],                     # 30
+                float(calculadora.valor_flete),                 # 31
+                costos['utilidad'],                             # 32
+                costos['rentabilidad'],                         # 33
+                float(calculadora.anticipo),                    # 34
+                costos['saldo'],                                # 35
+                1 if calculadora.hubo_anticipo_empresa else 0,  # 36
+                costos['ant_empresa'],                          # 37
+                costos['saldo_empresa'],                        # 38
+                str(observaciones)                              # 39
+            )
+
+            # 2. Ejecutamos la consulta con exactamente 39 placeholders (%s)
+            sql_insert = '''
                 INSERT INTO viajes_v4 (
                     fecha_creacion, placa, conductor, origen, destino, distancia_km,
                     dias_viaje, es_frontera, hubo_parqueo, nomina_admin, nomina_conductor,
@@ -196,49 +240,11 @@ class DatabaseManager:
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
                     %s, %s, %s, %s, %s, %s, %s, %s, %s
                 ) RETURNING id
-            ''', (
-                fecha_actual,
-                str(calculadora.tractomula.placa),
-                str(calculadora.conductor.nombre),
-                str(calculadora.ruta.origen),
-                str(calculadora.ruta.destino),
-                float(calculadora.ruta.distancia_km),
-                int(calculadora.dias_viaje),
-                1 if calculadora.es_frontera else 0,
-                1 if calculadora.hubo_parqueo else 0,
-                costos['nomina_admin'],
-                costos['nomina_conductor'],
-                costos['comision_conductor'],
-                costos['mantenimiento'],
-                costos['seguros'],
-                costos['tecnomecanica'],
-                costos['llantas'],
-                costos['aceite'],
-                costos['combustible'],
-                costos['galones_necesarios'],
-                float(calculadora.flypass),
-                float(calculadora.peajes),
-                costos['cruce_frontera'],
-                float(calculadora.hotel),
-                float(calculadora.comida),
-                costos['parqueo'],
-                float(calculadora.cargue_descargue),
-                float(calculadora.otros),
-                costos['total_gastos'],
-                costos['legalizacion'],
-                costos['punto_equilibrio'],
-                float(calculadora.valor_flete),
-                costos['utilidad'],
-                costos['rentabilidad'],
-                float(calculadora.anticipo),
-                costos['saldo'],
-                1 if calculadora.hubo_anticipo_empresa else 0,
-                costos['ant_empresa'],
-                costos['saldo_empresa'],
-                str(observaciones)
-            ))
+            '''
 
-            # Obtener el ID generado con seguridad
+            cursor.execute(sql_insert, datos_viaje)
+
+            # Obtener el ID generado
             result = cursor.fetchone()
             if result:
                 viaje_id = result[0]
@@ -249,8 +255,14 @@ class DatabaseManager:
             conn.commit()
             conn.close()
             return viaje_id
+
         except Exception as e:
-            st.error(f"❌ Error al guardar en base de datos: {e}")
+            st.error(f"❌ Error detallado al guardar: {e}")
+            # Esto imprimirá en pantalla si hay un desajuste de datos
+            try:
+                st.write(f"Datos preparados: {len(datos_viaje)} items")
+            except:
+                pass
             return None
 
     def obtener_todos_viajes(self):
@@ -453,25 +465,23 @@ class DatabaseManager:
 
         try:
             df = pd.read_sql_query(query, conn, params=params)
+            # Calcular compuestos
+            if not df.empty:
+                df['total_gastos'] = (
+                    df['total_admin'] + df['total_parafiscales'] + df['total_comision'] +
+                    df['total_mantenimiento'] + df['total_seguros'] + df['total_tecnomecanica'] +
+                    df['total_llantas'] + df['total_aceite'] + df['total_combustible'] +
+                    df['total_flypass'] + df['total_peajes'] + df['total_cruce_frontera'] +
+                    df['total_hotel'] + df['total_comida'] + df['total_parqueo'] +
+                    df['total_cargue_descargue'] + df['total_otros']
+                )
+                df['total_punto_equilibrio'] = df['total_gastos'] / 0.5
+                df['total_ut'] = df['total_cxc'] - df['total_gastos']
+                df['total_rentabilidad'] = (df['total_ut'] / df['total_cxc'] * 100).where(df['total_cxc'] != 0, 0)
         except Exception:
             df = pd.DataFrame()
             
         conn.close()
-
-        # Calcular compuestos
-        if not df.empty:
-            df['total_gastos'] = (
-                df['total_admin'] + df['total_parafiscales'] + df['total_comision'] +
-                df['total_mantenimiento'] + df['total_seguros'] + df['total_tecnomecanica'] +
-                df['total_llantas'] + df['total_aceite'] + df['total_combustible'] +
-                df['total_flypass'] + df['total_peajes'] + df['total_cruce_frontera'] +
-                df['total_hotel'] + df['total_comida'] + df['total_parqueo'] +
-                df['total_cargue_descargue'] + df['total_otros']
-            )
-            df['total_punto_equilibrio'] = df['total_gastos'] / 0.5
-            df['total_ut'] = df['total_cxc'] - df['total_gastos']
-            df['total_rentabilidad'] = (df['total_ut'] / df['total_cxc'] * 100).where(df['total_cxc'] != 0, 0)
-
         return df
 
     # Métodos para tractomulas
