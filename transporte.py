@@ -554,29 +554,43 @@ class DatabaseManager:
 
     # Métodos para rutas
     def guardar_ruta(self, ruta):
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO rutas (origen, destino, distancia_km, es_frontera, es_regional, es_aguachica)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        ''', (
-            ruta.origen, ruta.destino, ruta.distancia_km,
-            1 if ruta.es_frontera else 0,
-            1 if ruta.es_regional else 0,
-            1 if ruta.es_aguachica else 0
-        ))
-        conn.commit()
-        # Intentar obtener el ID insertado
-        try:
-            ruta_id = cursor.fetchone()[0]
-        except:
-            # Fallback
-            try:
-                ruta_id = cursor.lastrowid
-            except:
-                ruta_id = None
-        conn.close()
-        return ruta_id
+    """Guarda una ruta en la BD especificando columnas explícitamente"""
+    conn = self.get_connection()
+    cursor = conn.cursor()
+    
+    # Imprimir para debug
+    print(f"DEBUG - Guardando ruta:")
+    print(f"  es_frontera: {ruta.es_frontera}")
+    print(f"  es_regional: {ruta.es_regional}")
+    print(f"  es_aguachica: {ruta.es_aguachica}")
+    
+    cursor.execute('''
+        INSERT INTO rutas (origen, destino, distancia_km, es_frontera, es_regional, es_aguachica)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        RETURNING id, es_frontera, es_regional, es_aguachica
+    ''', (
+        ruta.origen, 
+        ruta.destino, 
+        ruta.distancia_km,
+        1 if ruta.es_frontera else 0,
+        1 if ruta.es_regional else 0,
+        1 if ruta.es_aguachica else 0
+    ))
+    
+    result = cursor.fetchone()
+    if result:
+        print(f"DEBUG - Guardado en BD:")
+        print(f"  ID: {result[0]}")
+        print(f"  es_frontera: {result[1]}")
+        print(f"  es_regional: {result[2]}")
+        print(f"  es_aguachica: {result[3]}")
+        ruta_id = result[0]
+    else:
+        ruta_id = None
+        
+    conn.commit()
+    conn.close()
+    return ruta_id
 
     def obtener_rutas(self):
         conn = self.get_connection()
@@ -1987,6 +2001,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
