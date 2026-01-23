@@ -582,22 +582,28 @@ class DatabaseManager:
         return ruta_id
 
     def obtener_rutas(self):
+        """Obtiene rutas con columnas explícitas para evitar el error de 'es_urbano'"""
         conn = self.get_connection()
         cursor = conn.cursor()
-        # Seleccionamos explícitamente saltándonos la columna 'es_urbano'
+        
+        # ⚠️ IMPORTANTE: Pedimos las columnas por nombre para saltarnos la columna 'es_urbano'
+        # que tienes en Supabase y que está corriendo todos los datos.
         cursor.execute("""
             SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica 
-            FROM rutas ORDER BY origen, destino
+            FROM rutas 
+            ORDER BY origen, destino
         """)
+        
         rutas = []
         for row in cursor.fetchall():
+            # Ahora estamos 100% seguros de qué dato es cual:
             rutas.append(Ruta(
-                origen=row[1],
-                destino=row[2],
-                distancia_km=row[3],
-                es_frontera=bool(row[4]),
-                es_regional=bool(row[5]),  # Ahora sí apunta a Regional
-                es_aguachica=bool(row[6])  # Ahora sí apunta a Aguachica
+                origen=row[1],             # Columna origen
+                destino=row[2],            # Columna destino
+                distancia_km=row[3],       # Columna distancia
+                es_frontera=bool(row[4]),  # Columna es_frontera
+                es_regional=bool(row[5]),  # Columna es_regional (AHORA SÍ ES CORRECTO)
+                es_aguachica=bool(row[6])  # Columna es_aguachica
             ))
         conn.close()
         return rutas
@@ -713,12 +719,19 @@ class CalculadoraCostos:
         return self.datos.NOMINA_CONDUCTOR_DIA * self.dias_viaje
 
     def calcular_comision_conductor(self) -> float:
+        # 1. Si es Aguachica -> 350.000
         if self.ruta.es_aguachica:
-            return self.datos.COMISION_AGUACHICA
+            return self.datos.COMISION_AGUACHICA 
+            
+        # 2. Si es Regional -> 180.000
         elif self.ruta.es_regional:
             return self.datos.COMISION_REGIONAL
+            
+        # 3. Si es Frontera -> 500.000
         elif self.es_frontera:
             return self.datos.COMISION_FRONTERA
+            
+        # 4. Si no es nada de lo anterior (Urbano/Normal) -> 100.000
         else:
             return self.datos.COMISION_NO_FRONTERA
 
@@ -1990,5 +2003,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
