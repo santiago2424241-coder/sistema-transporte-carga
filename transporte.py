@@ -553,11 +553,11 @@ class DatabaseManager:
         conn.close()
 
     # Métodos para rutas
-    def guardar_ruta(self, ruta):
+   def guardar_ruta(self, ruta):
         conn = self.get_connection()
         cursor = conn.cursor()
         
-        # Insertamos solo en las columnas que nos interesan, ignorando es_urbano
+        # Le decimos EXPLICITAMENTE en qué columnas guardar para que no se equivoque
         cursor.execute('''
             INSERT INTO rutas (origen, destino, distancia_km, es_frontera, es_regional, es_aguachica)
             VALUES (%s, %s, %s, %s, %s, %s)
@@ -570,16 +570,36 @@ class DatabaseManager:
             1 if ruta.es_aguachica else 0
         ))
         conn.commit()
-        
         try:
             ruta_id = cursor.fetchone()[0]
         except:
-            try:
-                ruta_id = cursor.lastrowid
-            except:
-                ruta_id = None
+            ruta_id = cursor.lastrowid
         conn.close()
         return ruta_id
+
+    def obtener_rutas(self):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        # AQUÍ ESTÁ EL TRUCO: Pedimos los nombres exactos para saltarnos la columna basura
+        cursor.execute("""
+            SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica 
+            FROM rutas 
+            ORDER BY origen, destino
+        """)
+        
+        rutas = []
+        for row in cursor.fetchall():
+            rutas.append(Ruta(
+                origen=row[1],
+                destino=row[2],
+                distancia_km=row[3],
+                es_frontera=bool(row[4]),
+                es_regional=bool(row[5]),   # Ahora SÍ es la columna 5 real
+                es_aguachica=bool(row[6])   # Ahora SÍ es la columna 6 real
+            ))
+        conn.close()
+        return rutas
 
     def obtener_rutas(self):
         """Obtiene rutas con columnas explícitas para evitar el error de 'es_urbano'"""
@@ -1437,7 +1457,7 @@ def main():
             conn = st.session_state.db.get_connection()
             cursor = conn.cursor()
             
-            # --- CORRECCIÓN AQUÍ: PEDIR COLUMNAS POR NOMBRE EXACTO ---
+            # CORRECCIÓN: Pedimos las columnas por nombre igual que en la función de arriba
             cursor.execute("""
                 SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica 
                 FROM rutas 
@@ -1451,7 +1471,8 @@ def main():
                 origen = ruta_data[1]
                 destino = ruta_data[2]
                 dist = ruta_data[3]
-                # Leemos usando índices fijos porque pedimos las columnas explícitamente arriba
+                
+                # Leemos los datos en el orden exacto que pedimos en el SELECT
                 es_front = bool(ruta_data[4])
                 es_reg = bool(ruta_data[5]) 
                 es_agua = bool(ruta_data[6])
@@ -1460,12 +1481,13 @@ def main():
                 with col1:
                     tags = []
                     if es_front:
-                        tags.append("🌐 FRONTERA")
+                        tags.append("🌐 FRONTERA ($500k)")
                     if es_reg:
-                        tags.append("📍 REGIONAL")
+                        tags.append("📍 REGIONAL ($180k)")
                     if es_agua:
-                        tags.append("🏙️ AGUACHICA")
-                    tags_str = " ".join(tags)
+                        tags.append("🏙️ AGUACHICA ($350k)")
+                    
+                    tags_str = " ".join(tags) if tags else "🚛 NORMAL ($100k)"
                     st.write(f"**{origen}** → **{destino}** ({formatear_numero(dist)} km) {tags_str}")
                 with col2:
                     if st.button("🗑️", key=f"eliminar_ruta_{ruta_id}"):
@@ -2003,6 +2025,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
