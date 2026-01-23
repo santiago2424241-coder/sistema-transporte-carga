@@ -578,19 +578,23 @@ class DatabaseManager:
         conn.close()
         return ruta_id
 
-    def obtener_rutas(self):
-        """Obtiene las rutas con orden de columnas explícito para evitar errores de mapeo"""
+   def obtener_rutas(self):
+        """Obtiene rutas pidiendo las columnas por nombre para evitar errores de orden"""
         conn = self.get_connection()
         cursor = conn.cursor()
-        # CORRECCIÓN: Pedimos las columnas por nombre explícito, NO usando *
+        
+        # AQUI ESTA LA CLAVE: Pedimos nombres explícitos, NO asterisco (*)
         cursor.execute("""
             SELECT origen, destino, distancia_km, es_frontera, es_regional, es_aguachica 
             FROM rutas 
             ORDER BY origen, destino
         """)
+        
         rutas = []
         for row in cursor.fetchall():
-            # Ahora los índices son: 0=origen, 1=destino, 2=dist, 3=front, 4=reg, 5=agua
+            # Ahora estamos 100% seguros de qué es cada posición:
+            # row[0]=Origen, row[1]=Destino, row[2]=Km, 
+            # row[3]=Frontera, row[4]=Regional, row[5]=Aguachica
             rutas.append(Ruta(
                 origen=row[0],
                 destino=row[1],
@@ -1987,4 +1991,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
