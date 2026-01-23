@@ -556,21 +556,24 @@ class DatabaseManager:
     def guardar_ruta(self, ruta):
         conn = self.get_connection()
         cursor = conn.cursor()
+        
+        # Insertamos solo en las columnas que nos interesan, ignorando es_urbano
         cursor.execute('''
             INSERT INTO rutas (origen, destino, distancia_km, es_frontera, es_regional, es_aguachica)
             VALUES (%s, %s, %s, %s, %s, %s)
         ''', (
-            ruta.origen, ruta.destino, ruta.distancia_km,
+            ruta.origen, 
+            ruta.destino, 
+            ruta.distancia_km,
             1 if ruta.es_frontera else 0,
             1 if ruta.es_regional else 0,
             1 if ruta.es_aguachica else 0
         ))
         conn.commit()
-        # Intentar obtener el ID insertado
+        
         try:
             ruta_id = cursor.fetchone()[0]
         except:
-            # Fallback
             try:
                 ruta_id = cursor.lastrowid
             except:
@@ -579,31 +582,31 @@ class DatabaseManager:
         return ruta_id
 
     def obtener_rutas(self):
+        """Obtiene rutas especificando columnas EXACTAS para evitar errores de orden"""
         conn = self.get_connection()
         cursor = conn.cursor()
         
-        # --- CORRECCIÓN: NUNCA USAR SELECT * ---
-        # Pedimos las columnas exactas para asegurar el orden, sin importar cómo estén en Supabase
+        # IMPORTANTE: No usamos asterisco (*). Pedimos los nombres exactos.
+        # Así ignoramos la columna 'es_urbano' que está estorbando.
         cursor.execute("""
-            SELECT origen, destino, distancia_km, es_frontera, es_regional, es_aguachica 
+            SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica
             FROM rutas 
             ORDER BY origen, destino
         """)
         
         rutas = []
         for row in cursor.fetchall():
-            # Como pedimos columnas específicas, los índices cambian (ya no traemos el ID en la posición 0)
+            # Ahora row tiene índices fijos porque nosotros los pedimos así en el SELECT
             rutas.append(Ruta(
-                origen=row[0],          # Antes row[1]
-                destino=row[1],         # Antes row[2]
-                distancia_km=row[2],    # Antes row[3]
-                es_frontera=bool(row[3]),
-                es_regional=bool(row[4]), # Ahora estamos seguros que esta es regional
-                es_aguachica=bool(row[5]) # Ahora estamos seguros que esta es aguachica
+                origen=row[1],          # origen
+                destino=row[2],         # destino
+                distancia_km=row[3],    # distancia
+                es_frontera=bool(row[4]),  # es_frontera
+                es_regional=bool(row[5]),  # es_regional (AHORA SÍ APUNTA AL DATO CORRECTO)
+                es_aguachica=bool(row[6])  # es_aguachica
             ))
         conn.close()
         return rutas
-
     def eliminar_ruta(self, ruta_id):
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -1986,3 +1989,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
