@@ -581,22 +581,22 @@ class DatabaseManager:
         return ruta_id
 
     def obtener_rutas(self):
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM rutas ORDER BY origen, destino")
-        rutas = []
-        for row in cursor.fetchall():
-            rutas.append(Ruta(
-                origen=row[1],
-                destino=row[2],
-                distancia_km=row[3],
-                es_frontera=bool(row[4]),
-                es_urbano=bool(row[5]) if len(row) > 5 else False,
-                es_regional=bool(row[6]) if len(row) > 6 else False,
-                es_aguachica=bool(row[7]) if len(row) > 7 else False
-            ))
-        conn.close()
-        return rutas
+    conn = self.get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, origen, destino, distancia_km, es_frontera, es_urbano, es_regional, es_aguachica FROM rutas ORDER BY origen, destino")
+    rutas = []
+    for row in cursor.fetchall():
+        rutas.append(Ruta(
+            origen=row[1],
+            destino=row[2],
+            distancia_km=row[3],
+            es_frontera=bool(row[4]),
+            es_urbano=bool(row[5]),
+            es_regional=bool(row[6]),
+            es_aguachica=bool(row[7])
+        ))
+    conn.close()
+    return rutas
 
     def eliminar_ruta(self, ruta_id):
         conn = self.get_connection()
@@ -1985,3 +1985,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
