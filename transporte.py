@@ -582,28 +582,22 @@ class DatabaseManager:
         return ruta_id
 
     def obtener_rutas(self):
-        """Obtiene rutas especificando columnas EXACTAS para evitar errores de orden"""
         conn = self.get_connection()
         cursor = conn.cursor()
-        
-        # IMPORTANTE: No usamos asterisco (*). Pedimos los nombres exactos.
-        # Así ignoramos la columna 'es_urbano' que está estorbando.
+        # Seleccionamos explícitamente saltándonos la columna 'es_urbano'
         cursor.execute("""
-            SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica
-            FROM rutas 
-            ORDER BY origen, destino
+            SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica 
+            FROM rutas ORDER BY origen, destino
         """)
-        
         rutas = []
         for row in cursor.fetchall():
-            # Ahora row tiene índices fijos porque nosotros los pedimos así en el SELECT
             rutas.append(Ruta(
-                origen=row[1],          # origen
-                destino=row[2],         # destino
-                distancia_km=row[3],    # distancia
-                es_frontera=bool(row[4]),  # es_frontera
-                es_regional=bool(row[5]),  # es_regional (AHORA SÍ APUNTA AL DATO CORRECTO)
-                es_aguachica=bool(row[6])  # es_aguachica
+                origen=row[1],
+                destino=row[2],
+                distancia_km=row[3],
+                es_frontera=bool(row[4]),
+                es_regional=bool(row[5]),  # Ahora sí apunta a Regional
+                es_aguachica=bool(row[6])  # Ahora sí apunta a Aguachica
             ))
         conn.close()
         return rutas
@@ -1429,7 +1423,13 @@ def main():
             st.subheader("Rutas Registradas")
             conn = st.session_state.db.get_connection()
             cursor = conn.cursor()
-            cursor.execute("SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica FROM rutas ORDER BY origen, destino")
+            
+            # --- CORRECCIÓN AQUÍ: PEDIR COLUMNAS POR NOMBRE EXACTO ---
+            cursor.execute("""
+                SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica 
+                FROM rutas 
+                ORDER BY origen, destino
+            """)
             rutas_con_id = cursor.fetchall()
             conn.close()
 
@@ -1438,9 +1438,10 @@ def main():
                 origen = ruta_data[1]
                 destino = ruta_data[2]
                 dist = ruta_data[3]
+                # Leemos usando índices fijos porque pedimos las columnas explícitamente arriba
                 es_front = bool(ruta_data[4])
-                es_reg = bool(ruta_data[5]) if len(ruta_data) > 5 else False
-                es_agua = bool(ruta_data[6]) if len(ruta_data) > 6 else False
+                es_reg = bool(ruta_data[5]) 
+                es_agua = bool(ruta_data[6])
 
                 col1, col2 = st.columns([4, 1])
                 with col1:
@@ -1989,4 +1990,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
