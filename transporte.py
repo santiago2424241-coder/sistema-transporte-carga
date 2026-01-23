@@ -553,11 +553,12 @@ class DatabaseManager:
         conn.close()
 
     # Métodos para rutas
-   def guardar_ruta(self, ruta):
+   # --- Asegúrate de que esta línea esté alineada con los otros métodos de la clase ---
+    def guardar_ruta(self, ruta):
         conn = self.get_connection()
         cursor = conn.cursor()
         
-        # Le decimos EXPLICITAMENTE en qué columnas guardar para que no se equivoque
+        # Insertamos explícitamente ignorando columnas basura
         cursor.execute('''
             INSERT INTO rutas (origen, destino, distancia_km, es_frontera, es_regional, es_aguachica)
             VALUES (%s, %s, %s, %s, %s, %s)
@@ -570,12 +571,40 @@ class DatabaseManager:
             1 if ruta.es_aguachica else 0
         ))
         conn.commit()
+        
         try:
             ruta_id = cursor.fetchone()[0]
         except:
-            ruta_id = cursor.lastrowid
+            try:
+                ruta_id = cursor.lastrowid
+            except:
+                ruta_id = None
         conn.close()
         return ruta_id
+
+    def obtener_rutas(self):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        # Leemos explícitamente ignorando columnas basura
+        cursor.execute("""
+            SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica 
+            FROM rutas 
+            ORDER BY origen, destino
+        """)
+        
+        rutas = []
+        for row in cursor.fetchall():
+            rutas.append(Ruta(
+                origen=row[1],
+                destino=row[2],
+                distancia_km=row[3],
+                es_frontera=bool(row[4]),
+                es_regional=bool(row[5]),
+                es_aguachica=bool(row[6])
+            ))
+        conn.close()
+        return rutas
 
     def obtener_rutas(self):
         conn = self.get_connection()
@@ -2025,6 +2054,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
