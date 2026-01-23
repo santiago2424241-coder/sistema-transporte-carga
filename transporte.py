@@ -553,7 +553,7 @@ class DatabaseManager:
         conn.close()
 
     # Métodos para rutas
-    def guardar_ruta(self, ruta):
+   def guardar_ruta(self, ruta):
     """Guarda una ruta en la BD especificando columnas explícitamente"""
     conn = self.get_connection()
     cursor = conn.cursor()
