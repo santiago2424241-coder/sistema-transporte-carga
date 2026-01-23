@@ -706,13 +706,21 @@ class CalculadoraCostos:
     def calcular_nomina_conductor(self) -> float:
         return self.datos.NOMINA_CONDUCTOR_DIA * self.dias_viaje
 
-    def calcular_comision_conductor(self) -> float:
-        if self.ruta.es_aguachica:
+   def calcular_comision_conductor(self) -> float:
+        # CORRECCIÓN DE PRIORIDADES:
+        # 1. Primero verifica si el usuario marcó "Es Frontera" en el viaje (Prioridad Máxima y mayor valor)
+        if self.es_frontera:
+            return self.datos.COMISION_FRONTERA
+        
+        # 2. Si no es frontera, verifica si la RUTA está guardada como Aguachica
+        elif self.ruta.es_aguachica:
             return self.datos.COMISION_AGUACHICA
+            
+        # 3. Si no es lo anterior, verifica si la RUTA está guardada como Regional
         elif self.ruta.es_regional:
             return self.datos.COMISION_REGIONAL
-        elif self.es_frontera:
-            return self.datos.COMISION_FRONTERA
+            
+        # 4. Si no es nada de lo anterior, paga la comisión normal
         else:
             return self.datos.COMISION_NO_FRONTERA
 
@@ -820,13 +828,18 @@ class CalculadoraCostos:
         }
 
 
-# ==================== GENERADOR DE REPORTES ====================
 class GeneradorReportes:
-    """Genera reportes detallados de costos"""
+    """Genera reportes detallados de costos con HORA COLOMBIA"""
+
+    @staticmethod
+    def obtener_hora_colombia():
+        """Ajusta la hora UTC del servidor a UTC-5 (Colombia)"""
+        return datetime.now() - timedelta(hours=5)
 
     @staticmethod
     def generar_reporte_texto(calculadora: CalculadoraCostos) -> str:
         costos = calculadora.calcular_costos_totales()
+        fecha_actual = GeneradorReportes.obtener_hora_colombia().strftime('%Y-%m-%d %H:%M:%S')
 
         reporte = f"""
 {'='*70}
@@ -889,16 +902,19 @@ RENTABILIDAD:             {costos['rentabilidad']:>18.1f} %
 ANT. EMPRESA (90%):       ${formatear_numero(costos['ant_empresa']):>18} COP
 SALDO EMPRESA:            ${formatear_numero(costos['saldo_empresa']):>18} COP
 
-Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Fecha de generación: {fecha_actual}
 {'='*70}
         """
         return reporte
 
     @staticmethod
     def generar_excel(calculadoras: List[CalculadoraCostos]) -> io.BytesIO:
-        """Genera un archivo Excel en memoria para descarga"""
+        """Genera un archivo Excel en memoria para descarga con Hora Colombia"""
         output = io.BytesIO()
         wb = Workbook()
+        
+        # Obtener hora Colombia
+        fecha_actual = GeneradorReportes.obtener_hora_colombia().strftime('%Y-%m-%d %H:%M:%S')
 
         # Estilos
         header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
@@ -926,7 +942,7 @@ Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         cell.alignment = Alignment(horizontal='center', vertical='center')
 
         ws_resumen.merge_cells('A2:M2')
-        ws_resumen['A2'] = f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        ws_resumen['A2'] = f"Generado: {fecha_actual}"
         ws_resumen['A2'].alignment = Alignment(horizontal='center')
 
         # Encabezados
@@ -1100,6 +1116,8 @@ Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df_totales.to_excel(writer, sheet_name='Totales por Flota', index=False)
+        output.seek(0)
+        return outputto_excel(writer, sheet_name='Totales por Flota', index=False)
         output.seek(0)
         return output
 
@@ -1977,3 +1995,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
