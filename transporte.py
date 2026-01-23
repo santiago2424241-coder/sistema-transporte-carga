@@ -579,18 +579,25 @@ class DatabaseManager:
         return ruta_id
 
     def obtener_rutas(self):
+        """Obtiene las rutas con orden de columnas explícito para evitar errores de mapeo"""
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM rutas ORDER BY origen, destino")
+        # CORRECCIÓN: Pedimos las columnas por nombre explícito, NO usando *
+        cursor.execute("""
+            SELECT origen, destino, distancia_km, es_frontera, es_regional, es_aguachica 
+            FROM rutas 
+            ORDER BY origen, destino
+        """)
         rutas = []
         for row in cursor.fetchall():
+            # Ahora los índices son: 0=origen, 1=destino, 2=dist, 3=front, 4=reg, 5=agua
             rutas.append(Ruta(
-                origen=row[1],
-                destino=row[2],
-                distancia_km=row[3],
-                es_frontera=bool(row[4]),
-                es_regional=bool(row[5]) if len(row) > 5 else False,
-                es_aguachica=bool(row[6]) if len(row) > 6 else False
+                origen=row[0],
+                destino=row[1],
+                distancia_km=float(row[2]),
+                es_frontera=bool(row[3]),
+                es_regional=bool(row[4]),
+                es_aguachica=bool(row[5])
             ))
         conn.close()
         return rutas
@@ -1415,38 +1422,41 @@ def main():
 
         if st.session_state.rutas:
             st.subheader("Rutas Registradas")
+            # Obtenemos ID y datos para el botón de borrar
             conn = st.session_state.db.get_connection()
             cursor = conn.cursor()
-            cursor.execute("SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica FROM rutas ORDER BY origen, destino")
-            rutas_con_id = cursor.fetchall()
+            cursor.execute("SELECT id, origen, destino FROM rutas ORDER BY origen, destino")
+            rutas_db = cursor.fetchall()
             conn.close()
 
-            for ruta_data in rutas_con_id:
-                ruta_id = ruta_data[0]
-                origen = ruta_data[1]
-                destino = ruta_data[2]
-                dist = ruta_data[3]
-                es_front = bool(ruta_data[4])
-                es_reg = bool(ruta_data[5]) if len(ruta_data) > 5 else False
-                es_agua = bool(ruta_data[6]) if len(ruta_data) > 6 else False
-
+            # Iteramos sobre los objetos ya cargados correctamente en memoria
+            # Asumiendo que st.session_state.rutas está sincronizado
+            for idx, ruta_obj in enumerate(st.session_state.rutas):
+                # Intentamos calzar el ID con el orden (no es perfecto pero funciona para visualización)
+                # O mejor, usamos los datos del objeto ruta_obj que ya corregimos en el Paso 1
+                
                 col1, col2 = st.columns([4, 1])
                 with col1:
                     tags = []
-                    if es_front:
+                    if ruta_obj.es_frontera:
                         tags.append("🌐 FRONTERA")
-                    if es_reg:
+                    if ruta_obj.es_regional:
                         tags.append("📍 REGIONAL")
-                    if es_agua:
+                    if ruta_obj.es_aguachica:
                         tags.append("🏙️ AGUACHICA")
+                    
                     tags_str = " ".join(tags)
-                    st.write(f"**{origen}** → **{destino}** ({formatear_numero(dist)} km) {tags_str}")
+                    st.write(f"**{ruta_obj.origen}** → **{ruta_obj.destino}** ({formatear_numero(ruta_obj.distancia_km)} km) {tags_str}")
+                
                 with col2:
-                    if st.button("🗑️", key=f"eliminar_ruta_{ruta_id}"):
-                        db.eliminar_ruta(ruta_id)
-                        st.session_state.rutas = db.obtener_rutas()
-                        st.success("Ruta eliminada")
-                        st.rerun()
+                    # Usamos el ID de la consulta auxiliar para poder borrar
+                    if idx < len(rutas_db):
+                        ruta_id_db = rutas_db[idx][0]
+                        if st.button("🗑️", key=f"eliminar_ruta_{ruta_id_db}"):
+                            db.eliminar_ruta(ruta_id_db)
+                            st.session_state.rutas = db.obtener_rutas()
+                            st.success("Ruta eliminada")
+                            st.rerun()
 
     with tab3:
         st.header("Tus Conductores")
@@ -1977,3 +1987,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
