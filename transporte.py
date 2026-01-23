@@ -553,26 +553,24 @@ class DatabaseManager:
         conn.close()
 
     # Métodos para rutas
-    # Métodos para rutas
     def guardar_ruta(self, ruta):
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO rutas (origen, destino, distancia_km, es_frontera, es_urbano, es_regional, es_aguachica)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO rutas (origen, destino, distancia_km, es_frontera, es_regional, es_aguachica)
+            VALUES (%s, %s, %s, %s, %s, %s)
         ''', (
-            ruta.origen, 
-            ruta.destino, 
-            ruta.distancia_km,
+            ruta.origen, ruta.destino, ruta.distancia_km,
             1 if ruta.es_frontera else 0,
-            1 if ruta.es_urbano else 0,
             1 if ruta.es_regional else 0,
             1 if ruta.es_aguachica else 0
         ))
         conn.commit()
+        # Intentar obtener el ID insertado
         try:
             ruta_id = cursor.fetchone()[0]
         except:
+            # Fallback
             try:
                 ruta_id = cursor.lastrowid
             except:
@@ -581,22 +579,30 @@ class DatabaseManager:
         return ruta_id
 
     def obtener_rutas(self):
-    conn = self.get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, origen, destino, distancia_km, es_frontera, es_urbano, es_regional, es_aguachica FROM rutas ORDER BY origen, destino")
-    rutas = []
-    for row in cursor.fetchall():
-        rutas.append(Ruta(
-            origen=row[1],
-            destino=row[2],
-            distancia_km=row[3],
-            es_frontera=bool(row[4]),
-            es_urbano=bool(row[5]),
-            es_regional=bool(row[6]),
-            es_aguachica=bool(row[7])
-        ))
-    conn.close()
-    return rutas
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        # --- CORRECCIÓN: NUNCA USAR SELECT * ---
+        # Pedimos las columnas exactas para asegurar el orden, sin importar cómo estén en Supabase
+        cursor.execute("""
+            SELECT origen, destino, distancia_km, es_frontera, es_regional, es_aguachica 
+            FROM rutas 
+            ORDER BY origen, destino
+        """)
+        
+        rutas = []
+        for row in cursor.fetchall():
+            # Como pedimos columnas específicas, los índices cambian (ya no traemos el ID en la posición 0)
+            rutas.append(Ruta(
+                origen=row[0],          # Antes row[1]
+                destino=row[1],         # Antes row[2]
+                distancia_km=row[2],    # Antes row[3]
+                es_frontera=bool(row[3]),
+                es_regional=bool(row[4]), # Ahora estamos seguros que esta es regional
+                es_aguachica=bool(row[5]) # Ahora estamos seguros que esta es aguachica
+            ))
+        conn.close()
+        return rutas
 
     def eliminar_ruta(self, ruta_id):
         conn = self.get_connection()
@@ -626,7 +632,6 @@ class Ruta:
     destino: str
     distancia_km: float
     es_frontera: bool
-    es_urbano: bool = False  
     es_regional: bool = False
     es_aguachica: bool = False
 
@@ -1394,7 +1399,7 @@ def main():
 
     with tab2:
         st.header("Tus Rutas")
-        with st.form(key="form_ruta"):  # ← CORRECCIÓN: Esta línea debe estar alineada aquí
+        with st.form(key="form_ruta"):
             col1, col2 = st.columns(2)
             with col1:
                 origen = st.text_input("Origen")
@@ -1402,7 +1407,6 @@ def main():
                 distancia_km = st.number_input("Distancia (km)", min_value=0.0)
             with col2:
                 es_frontera = st.checkbox("¿Es ruta a frontera?", help="Activa si el destino es hacia frontera")
-                es_urbano = st.checkbox("¿Es urbano?", help="Ruta dentro de ciudad")
                 es_regional = st.checkbox("¿Es regional?", help="Comisión conductor: $180,000")
                 es_aguachica = st.checkbox("¿Es para Aguachica?", help="Comisión conductor: $350,000")
                 ida_vuelta = st.checkbox("Ida y vuelta")
@@ -1412,37 +1416,34 @@ def main():
                 if ida_vuelta:
                     distancia_km *= 2
                     destino = f"{destino} (ida y vuelta)"
-                ruta = Ruta(origen, destino, distancia_km, es_frontera, es_urbano, es_regional, es_aguachica)
+                ruta = Ruta(origen, destino, distancia_km, es_frontera, es_regional, es_aguachica)
                 ruta_id = db.guardar_ruta(ruta)
                 st.session_state.rutas = db.obtener_rutas()
                 st.success(f"✅ Ruta {origen} → {destino} guardada!")
                 st.rerun()
 
-        if st.session_state.rutas:  # ← CORRECCIÓN: Esta línea debe estar alineada aquí (mismo nivel que with st.form)
+        if st.session_state.rutas:
             st.subheader("Rutas Registradas")
             conn = st.session_state.db.get_connection()
             cursor = conn.cursor()
-            cursor.execute("SELECT id, origen, destino, distancia_km, es_frontera, es_urbano, es_regional, es_aguachica FROM rutas ORDER BY origen, destino")
+            cursor.execute("SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica FROM rutas ORDER BY origen, destino")
             rutas_con_id = cursor.fetchall()
             conn.close()
 
-            for ruta_data in rutas_con_id:  # ← Esta línea está bien ahora
+            for ruta_data in rutas_con_id:
                 ruta_id = ruta_data[0]
                 origen = ruta_data[1]
                 destino = ruta_data[2]
                 dist = ruta_data[3]
                 es_front = bool(ruta_data[4])
-                es_urb = bool(ruta_data[5]) if len(ruta_data) > 5 else False
-                es_reg = bool(ruta_data[6]) if len(ruta_data) > 6 else False
-                es_agua = bool(ruta_data[7]) if len(ruta_data) > 7 else False
+                es_reg = bool(ruta_data[5]) if len(ruta_data) > 5 else False
+                es_agua = bool(ruta_data[6]) if len(ruta_data) > 6 else False
 
                 col1, col2 = st.columns([4, 1])
                 with col1:
                     tags = []
                     if es_front:
                         tags.append("🌐 FRONTERA")
-                    if es_urb:
-                        tags.append("🏙️ URBANO")
                     if es_reg:
                         tags.append("📍 REGIONAL")
                     if es_agua:
@@ -1985,4 +1986,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
