@@ -553,7 +553,8 @@ class DatabaseManager:
         conn.close()
 
     # Métodos para rutas
-   def guardar_ruta(self, ruta):
+   # Métodos para rutas
+    def guardar_ruta(self, ruta):
         """Guarda una ruta en la BD especificando columnas explícitamente"""
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -615,7 +616,6 @@ class DatabaseManager:
         cursor.execute("DELETE FROM rutas WHERE id = %s", (ruta_id,))
         conn.commit()
         conn.close()
-
 
 # ==================== CLASES DE DATOS ====================
 @dataclass
@@ -2001,6 +2001,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
