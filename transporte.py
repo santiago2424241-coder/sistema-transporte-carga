@@ -552,14 +552,14 @@ class DatabaseManager:
         conn.commit()
         conn.close()
 
-   # Métodos para rutas
+    # Métodos para rutas
+    # Métodos para rutas
     def guardar_ruta(self, ruta):
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO rutas (origen, destino, distancia_km, es_frontera, es_urbano, es_regional, es_aguachica)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
-            RETURNING id
         ''', (
             ruta.origen, 
             ruta.destino, 
@@ -569,9 +569,14 @@ class DatabaseManager:
             1 if ruta.es_regional else 0,
             1 if ruta.es_aguachica else 0
         ))
-        result = cursor.fetchone()
-        ruta_id = result[0] if result else None
         conn.commit()
+        try:
+            ruta_id = cursor.fetchone()[0]
+        except:
+            try:
+                ruta_id = cursor.lastrowid
+            except:
+                ruta_id = None
         conn.close()
         return ruta_id
 
@@ -586,9 +591,9 @@ class DatabaseManager:
                 destino=row[2],
                 distancia_km=row[3],
                 es_frontera=bool(row[4]),
-                es_urbano=bool(row[5]),
-                es_regional=bool(row[6]),
-                es_aguachica=bool(row[7])
+                es_urbano=bool(row[5]) if len(row) > 5 else False,
+                es_regional=bool(row[6]) if len(row) > 6 else False,
+                es_aguachica=bool(row[7]) if len(row) > 7 else False
             ))
         conn.close()
         return rutas
@@ -599,6 +604,7 @@ class DatabaseManager:
         cursor.execute("DELETE FROM rutas WHERE id = %s", (ruta_id,))
         conn.commit()
         conn.close()
+
 
 # ==================== CLASES DE DATOS ====================
 @dataclass
@@ -620,6 +626,7 @@ class Ruta:
     destino: str
     distancia_km: float
     es_frontera: bool
+    es_urbano: bool = False  
     es_regional: bool = False
     es_aguachica: bool = False
 
@@ -1385,9 +1392,9 @@ def main():
                         st.success(f"Tractomula {t.placa} eliminada")
                         st.rerun()
 
-   with tab2:
+    with tab2:
         st.header("Tus Rutas")
-        with st.form(key="form_ruta"):
+        with st.form(key="form_ruta"):  # ← CORRECCIÓN: Esta línea debe estar alineada aquí
             col1, col2 = st.columns(2)
             with col1:
                 origen = st.text_input("Origen")
@@ -1395,7 +1402,7 @@ def main():
                 distancia_km = st.number_input("Distancia (km)", min_value=0.0)
             with col2:
                 es_frontera = st.checkbox("¿Es ruta a frontera?", help="Activa si el destino es hacia frontera")
-                es_urbano = st.checkbox("¿Es urbano?", help="Comisión conductor urbano")
+                es_urbano = st.checkbox("¿Es urbano?", help="Ruta dentro de ciudad")
                 es_regional = st.checkbox("¿Es regional?", help="Comisión conductor: $180,000")
                 es_aguachica = st.checkbox("¿Es para Aguachica?", help="Comisión conductor: $350,000")
                 ida_vuelta = st.checkbox("Ida y vuelta")
@@ -1411,7 +1418,7 @@ def main():
                 st.success(f"✅ Ruta {origen} → {destino} guardada!")
                 st.rerun()
 
-        if st.session_state.rutas:
+        if st.session_state.rutas:  # ← CORRECCIÓN: Esta línea debe estar alineada aquí (mismo nivel que with st.form)
             st.subheader("Rutas Registradas")
             conn = st.session_state.db.get_connection()
             cursor = conn.cursor()
@@ -1419,15 +1426,15 @@ def main():
             rutas_con_id = cursor.fetchall()
             conn.close()
 
-            for ruta_data in rutas_con_id:
+            for ruta_data in rutas_con_id:  # ← Esta línea está bien ahora
                 ruta_id = ruta_data[0]
                 origen = ruta_data[1]
                 destino = ruta_data[2]
                 dist = ruta_data[3]
                 es_front = bool(ruta_data[4])
-                es_urb = bool(ruta_data[5])
-                es_reg = bool(ruta_data[6])
-                es_agua = bool(ruta_data[7])
+                es_urb = bool(ruta_data[5]) if len(ruta_data) > 5 else False
+                es_reg = bool(ruta_data[6]) if len(ruta_data) > 6 else False
+                es_agua = bool(ruta_data[7]) if len(ruta_data) > 7 else False
 
                 col1, col2 = st.columns([4, 1])
                 with col1:
@@ -1441,15 +1448,14 @@ def main():
                     if es_agua:
                         tags.append("🏙️ AGUACHICA")
                     tags_str = " ".join(tags)
-                    
                     st.write(f"**{origen}** → **{destino}** ({formatear_numero(dist)} km) {tags_str}")
-                    
                 with col2:
                     if st.button("🗑️", key=f"eliminar_ruta_{ruta_id}"):
                         db.eliminar_ruta(ruta_id)
                         st.session_state.rutas = db.obtener_rutas()
                         st.success("Ruta eliminada")
                         st.rerun()
+
     with tab3:
         st.header("Tus Conductores")
 
