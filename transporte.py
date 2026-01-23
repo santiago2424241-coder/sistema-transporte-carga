@@ -674,19 +674,159 @@ PLACA_CONDUCTOR = {
 }
 
 
-class GeneradorReportes:
-    """Genera reportes detallados de costos con HORA COLOMBIA"""
+# ==================== CALCULADORA DE COSTOS ====================
+class CalculadoraCostos:
+    """Calcula todos los costos del viaje con fórmulas reales ACTUALIZADAS"""
 
-    @staticmethod
-    def obtener_hora_colombia():
-        """Ajusta la hora UTC del servidor a UTC-5 (Colombia)"""
-        return datetime.now() - timedelta(hours=5)
+    def __init__(self, tractomula: Tractomula, conductor: Conductor, ruta: Ruta,
+                 dias_viaje: int, es_frontera: bool, hubo_parqueo: bool,
+                 flypass: float, peajes: float, hotel: float, comida: float,
+                 cargue_descargue: float, otros: float, valor_flete: float,
+                 anticipo: float, hubo_anticipo_empresa: bool, datos: DatosColombia):
+        self.tractomula = tractomula
+        self.conductor = conductor
+        self.ruta = ruta
+        self.dias_viaje = dias_viaje
+        self.es_frontera = es_frontera
+        self.hubo_parqueo = hubo_parqueo
+        self.flypass = flypass
+        self.peajes = peajes
+        self.hotel = hotel
+        self.comida = comida
+        self.cargue_descargue = cargue_descargue
+        self.otros = otros
+        self.valor_flete = valor_flete
+        self.anticipo = anticipo
+        self.hubo_anticipo_empresa = hubo_anticipo_empresa
+        self.datos = datos
+
+    def calcular_nomina_admin(self) -> float:
+        return (self.datos.NOMINA_ADMIN_BASE / self.datos.NOMINA_ADMIN_DIVISOR) * self.dias_viaje
+
+    def calcular_nomina_conductor(self) -> float:
+        return self.datos.NOMINA_CONDUCTOR_DIA * self.dias_viaje
+
+    def calcular_comision_conductor(self) -> float:
+        if self.ruta.es_aguachica:
+            return self.datos.COMISION_AGUACHICA
+        elif self.ruta.es_regional:
+            return self.datos.COMISION_REGIONAL
+        elif self.es_frontera:
+            return self.datos.COMISION_FRONTERA
+        else:
+            return self.datos.COMISION_NO_FRONTERA
+
+    def calcular_mantenimiento(self) -> float:
+        return (self.datos.MANTENIMIENTO_MENSUAL / 30) * self.dias_viaje
+
+    def calcular_seguros(self) -> float:
+        seguro_diario = (
+            (self.datos.SEGURO_1 / 365) +
+            (self.datos.SEGURO_2 / 365) +
+            (self.datos.SEGURO_3 / 14 / 365)
+        )
+        return seguro_diario * self.dias_viaje
+
+    def calcular_tecnomecanica(self) -> float:
+        return (self.datos.TECNOMECANICA_ANUAL / 365) * self.dias_viaje
+
+    def calcular_llantas(self) -> float:
+        costo_por_km = (self.datos.LLANTAS_COSTO * self.datos.LLANTAS_CANTIDAD) / self.datos.LLANTAS_KM
+        return costo_por_km * self.ruta.distancia_km
+
+    def calcular_aceite(self) -> float:
+        costo_por_km = self.datos.ACEITE_COSTO / self.datos.ACEITE_KM
+        return costo_por_km * self.ruta.distancia_km
+
+    def calcular_galones_necesarios(self) -> float:
+        if self.tractomula.consumo_km_galon <= 0:
+            return 0.0
+        return self.ruta.distancia_km / self.tractomula.consumo_km_galon
+
+    def calcular_combustible(self) -> float:
+        galones = self.calcular_galones_necesarios()
+        return galones * self.datos.PRECIO_DIESEL
+
+    def calcular_cruce_frontera(self) -> float:
+        return self.datos.CRUCE_FRONTERA if self.es_frontera else 0
+
+    def calcular_parqueo(self) -> float:
+        return self.datos.PARQUEO_DIA * self.dias_viaje if self.hubo_parqueo else 0
+
+    def calcular_legalizacion(self) -> float:
+        return (self.peajes + self.calcular_cruce_frontera() + self.hotel +
+                self.comida + self.calcular_parqueo() + self.cargue_descargue + self.otros)
+
+    def calcular_saldo(self) -> float:
+        legalizacion = self.calcular_legalizacion()
+        return self.anticipo - legalizacion
+
+    def calcular_ant_empresa(self) -> float:
+        if self.hubo_anticipo_empresa:
+            return self.valor_flete * self.datos.MARGEN_ANT_EMPRESA
+        else:
+            return 0.0
+
+    def calcular_costos_totales(self) -> Dict[str, float]:
+        nomina_admin = self.calcular_nomina_admin()
+        nomina_conductor = self.calcular_nomina_conductor()
+        comision_conductor = self.calcular_comision_conductor()
+        mantenimiento = self.calcular_mantenimiento()
+        seguros = self.calcular_seguros()
+        tecnomecanica = self.calcular_tecnomecanica()
+        llantas = self.calcular_llantas()
+        aceite = self.calcular_aceite()
+        galones_necesarios = self.calcular_galones_necesarios()
+        combustible = self.calcular_combustible()
+        cruce_frontera = self.calcular_cruce_frontera()
+        parqueo = self.calcular_parqueo()
+
+        total_gastos = (
+            nomina_admin + nomina_conductor + comision_conductor + mantenimiento +
+            seguros + tecnomecanica + llantas + aceite + combustible +
+            self.flypass + self.peajes + cruce_frontera + self.hotel +
+            self.comida + parqueo + self.cargue_descargue + self.otros
+        )
+
+        legalizacion = self.calcular_legalizacion()
+        saldo = self.calcular_saldo()
+        punto_equilibrio = total_gastos / self.datos.DIVISOR_PUNTO_EQUILIBRIO
+        utilidad = self.valor_flete - total_gastos
+        rentabilidad = (utilidad / self.valor_flete * 100) if self.valor_flete > 0 else 0
+        ant_empresa = self.calcular_ant_empresa()
+        saldo_empresa = self.valor_flete - ant_empresa
+
+        return {
+            'nomina_admin': round(nomina_admin, 2),
+            'nomina_conductor': round(nomina_conductor, 2),
+            'comision_conductor': round(comision_conductor, 2),
+            'mantenimiento': round(mantenimiento, 2),
+            'seguros': round(seguros, 2),
+            'tecnomecanica': round(tecnomecanica, 2),
+            'llantas': round(llantas, 2),
+            'aceite': round(aceite, 2),
+            'combustible': round(combustible, 2),
+            'galones_necesarios': round(galones_necesarios, 2),
+            'cruce_frontera': round(cruce_frontera, 2),
+            'parqueo': round(parqueo, 2),
+            'total_gastos': round(total_gastos, 2),
+            'legalizacion': round(legalizacion, 2),
+            'saldo': round(saldo, 2),
+            'punto_equilibrio': round(punto_equilibrio, 2),
+            'utilidad': round(utilidad, 2),
+            'rentabilidad': round(rentabilidad, 2),
+            'ant_empresa': round(ant_empresa, 2),
+            'saldo_empresa': round(saldo_empresa, 2),
+        }
+
+
+# ==================== GENERADOR DE REPORTES ====================
+class GeneradorReportes:
+    """Genera reportes detallados de costos"""
 
     @staticmethod
     def generar_reporte_texto(calculadora: CalculadoraCostos) -> str:
         costos = calculadora.calcular_costos_totales()
-        # CORRECCIÓN DE HORA
-        fecha_actual = GeneradorReportes.obtener_hora_colombia().strftime('%Y-%m-%d %H:%M:%S')
 
         reporte = f"""
 {'='*70}
@@ -749,7 +889,7 @@ RENTABILIDAD:             {costos['rentabilidad']:>18.1f} %
 ANT. EMPRESA (90%):       ${formatear_numero(costos['ant_empresa']):>18} COP
 SALDO EMPRESA:            ${formatear_numero(costos['saldo_empresa']):>18} COP
 
-Fecha de generación: {fecha_actual}
+Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 {'='*70}
         """
         return reporte
@@ -759,9 +899,6 @@ Fecha de generación: {fecha_actual}
         """Genera un archivo Excel en memoria para descarga"""
         output = io.BytesIO()
         wb = Workbook()
-
-        # Obtener hora Colombia
-        fecha_actual = GeneradorReportes.obtener_hora_colombia().strftime('%Y-%m-%d %H:%M:%S')
 
         # Estilos
         header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
@@ -789,7 +926,7 @@ Fecha de generación: {fecha_actual}
         cell.alignment = Alignment(horizontal='center', vertical='center')
 
         ws_resumen.merge_cells('A2:M2')
-        ws_resumen['A2'] = f"Generado: {fecha_actual}"
+        ws_resumen['A2'] = f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         ws_resumen['A2'].alignment = Alignment(horizontal='center')
 
         # Encabezados
@@ -1840,5 +1977,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
