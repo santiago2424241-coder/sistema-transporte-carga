@@ -1389,37 +1389,74 @@ def main():
                         st.rerun()
 
     with tab2:
-    st.header("Tus Rutas")
-    with st.form(key="form_ruta"):
-        col1, col2 = st.columns(2)
-        with col1:
-            origen = st.text_input("Origen")
-            destino = st.text_input("Destino")
-            distancia_km = st.number_input("Distancia (km)", min_value=0.0)
-        with col2:
-            es_frontera = st.checkbox("¿Es ruta a frontera?", help="Activa si el destino es hacia frontera")
-            es_regional = st.checkbox("¿Es regional?", help="Comisión conductor: $180,000")
-            es_aguachica = st.checkbox("¿Es para Aguachica?", help="Comisión conductor: $350,000")
-            ida_vuelta = st.checkbox("Ida y vuelta")
+        st.header("Tus Rutas")
+        with st.form(key="form_ruta"):
+            col1, col2 = st.columns(2)
+            with col1:
+                origen = st.text_input("Origen")
+                destino = st.text_input("Destino")
+                distancia_km = st.number_input("Distancia (km)", min_value=0.0)
+            with col2:
+                es_frontera = st.checkbox("¿Es ruta a frontera?", help="Activa si el destino es hacia frontera")
+                es_regional = st.checkbox("¿Es regional?", help="Comisión conductor: $180,000")
+                es_aguachica = st.checkbox("¿Es para Aguachica?", help="Comisión conductor: $350,000")
+                ida_vuelta = st.checkbox("Ida y vuelta")
 
-        submit = st.form_submit_button("Agregar Ruta")
-        if submit and origen and destino:
-            if ida_vuelta:
-                distancia_km *= 2
-                destino = f"{destino} (ida y vuelta)"
-            ruta = Ruta(origen, destino, distancia_km, es_frontera, es_regional, es_aguachica)
-            ruta_id = db.guardar_ruta(ruta)
-            st.session_state.rutas = db.obtener_rutas()
-            
-            # Mostrar confirmación con los valores correctos
-            st.success(f"✅ Ruta {origen} → {destino} guardada!")
-            st.info(f"""
-            **Configuración guardada:**
-            - Es Frontera: {'✅ Sí' if es_frontera else '❌ No'}
-            - Es Regional: {'✅ Sí' if es_regional else '❌ No'}
-            - Es Aguachica: {'✅ Sí' if es_aguachica else '❌ No'}
-            """)
-            st.rerun()
+            submit = st.form_submit_button("Agregar Ruta")
+            if submit and origen and destino:
+                if ida_vuelta:
+                    distancia_km *= 2
+                    destino = f"{destino} (ida y vuelta)"
+                ruta = Ruta(origen, destino, distancia_km, es_frontera, es_regional, es_aguachica)
+                ruta_id = db.guardar_ruta(ruta)
+                st.session_state.rutas = db.obtener_rutas()
+                
+                # Mostrar confirmación con los valores correctos
+                st.success(f"✅ Ruta {origen} → {destino} guardada!")
+                st.info(f"""
+                **Configuración guardada:**
+                - Es Frontera: {'✅ Sí' if es_frontera else '❌ No'}
+                - Es Regional: {'✅ Sí' if es_regional else '❌ No'}
+                - Es Aguachica: {'✅ Sí' if es_aguachica else '❌ No'}
+                """)
+                st.rerun()
+
+        if st.session_state.rutas:
+            st.subheader("Rutas Registradas")
+            conn = st.session_state.db.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica FROM rutas ORDER BY origen, destino")
+            rutas_con_id = cursor.fetchall()
+            conn.close()
+
+            for ruta_data in rutas_con_id:
+                ruta_id = ruta_data[0]
+                origen = ruta_data[1]
+                destino = ruta_data[2]
+                dist = ruta_data[3]
+                es_front = bool(ruta_data[4])
+                es_reg = bool(ruta_data[5])
+                es_agua = bool(ruta_data[6])
+
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    tags = []
+                    if es_front:
+                        tags.append("🌐 FRONTERA")
+                    if es_reg:
+                        tags.append("📍 REGIONAL")
+                    if es_agua:
+                        tags.append("🏙️ AGUACHICA")
+                    tags_str = " ".join(tags)
+                    
+                    st.write(f"**{origen}** → **{destino}** ({formatear_numero(dist)} km) {tags_str}")
+                    
+                with col2:
+                    if st.button("🗑️", key=f"eliminar_ruta_{ruta_id}"):
+                        db.eliminar_ruta(ruta_id)
+                        st.session_state.rutas = db.obtener_rutas()
+                        st.success("Ruta eliminada")
+                        st.rerun()
 
     if st.session_state.rutas:
         st.subheader("Rutas Registradas")
@@ -1988,4 +2025,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
