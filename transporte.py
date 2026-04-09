@@ -30,7 +30,7 @@ except:
 
 
 # ==================== CONFIGURACIÓN SUPABASE ====================
-SUPABASE_DB_URL = "postgresql://postgres.wiomyjrmsrhcgvhgkbqe:Conejito800$@aws-1-us-west-2.pooler.supabase.com:6543/postgres"
+SUPABASE_DB_URL = ""
 
 
 # ==================== FUNCIONES DE FORMATO ====================
