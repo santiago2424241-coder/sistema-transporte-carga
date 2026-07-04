@@ -212,6 +212,7 @@ class DatabaseManager:
                     periodo_fin DATE NOT NULL,
                     viajes_incluidos TEXT,
                     cantidad_viajes INTEGER DEFAULT 0,
+                    placas TEXT,
                     total_nomina REAL DEFAULT 0,
                     total_comisiones REAL DEFAULT 0,
                     total_anticipos REAL DEFAULT 0,
@@ -222,6 +223,7 @@ class DatabaseManager:
                     fecha_creacion TEXT
                 )
             ''')
+            cursor.execute("ALTER TABLE liquidaciones_conductor ADD COLUMN IF NOT EXISTS placas TEXT")
 
             # --- NUEVA TABLA: Cuentas por pagar/cobrar con vencimientos ---
             cursor.execute('''
@@ -391,6 +393,55 @@ class DatabaseManager:
         cursor.execute("DELETE FROM viajes_v4 WHERE id = %s", (viaje_id,))
         conn.commit()
         conn.close()
+
+    def actualizar_viaje(self, viaje_id, calculadora, fecha_viaje, observaciones=""):
+        """Recalcula y actualiza un viaje ya guardado (edición desde Trazabilidad).
+        No modifica fecha_creacion (fecha de registro original)."""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            costos = calculadora.calcular_costos_totales()
+            fecha_viaje_str = fecha_viaje.strftime('%Y-%m-%d') if fecha_viaje else None
+
+            cursor.execute('''
+                UPDATE viajes_v4 SET
+                    placa = %s, conductor = %s, origen = %s, destino = %s, distancia_km = %s,
+                    dias_viaje = %s, es_frontera = %s, hubo_parqueo = %s,
+                    nomina_admin = %s, nomina_conductor = %s, comision_conductor = %s,
+                    mantenimiento = %s, seguros = %s, tecnomecanica = %s, llantas = %s,
+                    aceite = %s, combustible = %s, galones_necesarios = %s,
+                    flypass = %s, peajes = %s, cruce_frontera = %s, hotel = %s, comida = %s,
+                    parqueo = %s, cargue_descargue = %s, otros = %s,
+                    total_gastos = %s, legalizacion = %s, punto_equilibrio = %s, valor_flete = %s,
+                    utilidad = %s, rentabilidad = %s, anticipo = %s, saldo = %s,
+                    hubo_anticipo_empresa = %s, ant_empresa = %s, saldo_empresa = %s,
+                    observaciones = %s, urea_acpm = %s, transporte = %s, propina_comision = %s,
+                    fecha_viaje = %s
+                WHERE id = %s
+            ''', (
+                str(calculadora.tractomula.placa), str(calculadora.conductor.nombre),
+                str(calculadora.ruta.origen), str(calculadora.ruta.destino),
+                float(calculadora.ruta.distancia_km), int(calculadora.dias_viaje),
+                1 if calculadora.es_frontera else 0, 1 if calculadora.hubo_parqueo else 0,
+                costos['nomina_admin'], costos['nomina_conductor'], costos['comision_conductor'],
+                costos['mantenimiento'], costos['seguros'], costos['tecnomecanica'], costos['llantas'],
+                costos['aceite'], costos['combustible'], costos['galones_necesarios'],
+                float(calculadora.flypass), float(calculadora.peajes), costos['cruce_frontera'],
+                float(calculadora.hotel), float(calculadora.comida), costos['parqueo'],
+                float(calculadora.cargue_descargue), float(calculadora.otros),
+                costos['total_gastos'], costos['legalizacion'], costos['punto_equilibrio'],
+                float(calculadora.valor_flete), costos['utilidad'], costos['rentabilidad'],
+                float(calculadora.anticipo), costos['saldo'],
+                1 if calculadora.hubo_anticipo_empresa else 0, costos['ant_empresa'], costos['saldo_empresa'],
+                str(observaciones), float(calculadora.urea_acpm), float(calculadora.transporte),
+                float(calculadora.propina_comision), fecha_viaje_str, viaje_id
+            ))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            st.error(f"❌ Error al actualizar el viaje: {e}")
+            return False
 
     def obtener_estadisticas(self):
         conn = self.get_connection()
@@ -721,7 +772,7 @@ class DatabaseManager:
         """Trae los viajes de un conductor en un rango de fechas (por fecha_viaje real)"""
         conn = self.get_connection()
         query = """
-            SELECT id, fecha_viaje, origen, destino, nomina_conductor, comision_conductor, anticipo
+            SELECT id, fecha_viaje, placa, origen, destino, comision_conductor
             FROM viajes_v4
             WHERE conductor = %s AND fecha_viaje >= %s AND fecha_viaje <= %s
             ORDER BY fecha_viaje
@@ -732,35 +783,34 @@ class DatabaseManager:
 
     def guardar_liquidacion(self, conductor, periodo_inicio, periodo_fin, df_viajes, observaciones=""):
         """Calcula y guarda la liquidación de un conductor para un periodo (ej. quincena).
-        Total a Pagar = Total Nómina + Total Comisiones - Total Anticipos"""
+        Total a Pagar = Total Comisiones (no se suma nómina ni se resta anticipo)."""
         conn = self.get_connection()
         cursor = conn.cursor()
 
-        total_nomina = float(df_viajes['nomina_conductor'].sum()) if not df_viajes.empty else 0.0
         total_comisiones = float(df_viajes['comision_conductor'].sum()) if not df_viajes.empty else 0.0
-        total_anticipos = float(df_viajes['anticipo'].sum()) if not df_viajes.empty else 0.0
-        total_a_pagar = total_nomina + total_comisiones - total_anticipos
+        total_a_pagar = total_comisiones
         viajes_incluidos = ",".join(str(i) for i in df_viajes['id'].tolist()) if not df_viajes.empty else ""
         cantidad_viajes = len(df_viajes)
+        placas = ", ".join(sorted(df_viajes['placa'].unique())) if not df_viajes.empty else ""
 
         hora_colombia = datetime.now() - timedelta(hours=5)
         fecha_creacion = hora_colombia.strftime('%Y-%m-%d %H:%M:%S')
 
         cursor.execute('''
             INSERT INTO liquidaciones_conductor (
-                conductor, periodo_inicio, periodo_fin, viajes_incluidos, cantidad_viajes,
-                total_nomina, total_comisiones, total_anticipos, total_a_pagar,
+                conductor, periodo_inicio, periodo_fin, viajes_incluidos, cantidad_viajes, placas,
+                total_comisiones, total_a_pagar,
                 estado, observaciones, fecha_creacion
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'Pendiente', %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'Pendiente', %s, %s)
             RETURNING id
-        ''', (conductor, periodo_inicio, periodo_fin, viajes_incluidos, cantidad_viajes,
-              total_nomina, total_comisiones, total_anticipos, total_a_pagar,
+        ''', (conductor, periodo_inicio, periodo_fin, viajes_incluidos, cantidad_viajes, placas,
+              total_comisiones, total_a_pagar,
               observaciones, fecha_creacion))
         result = cursor.fetchone()
         liquidacion_id = result[0] if result else None
         conn.commit()
         conn.close()
-        return liquidacion_id, total_nomina, total_comisiones, total_anticipos, total_a_pagar
+        return liquidacion_id, cantidad_viajes, placas, total_comisiones, total_a_pagar
 
     def obtener_liquidaciones(self, conductor=None, estado=None):
         conn = self.get_connection()
@@ -2230,10 +2280,111 @@ def main():
                         st.markdown("### 📝 Observaciones")
                         st.info(viaje[39])
 
-                    if st.button("🗑️ Eliminar este viaje", type="secondary"):
-                        db.eliminar_viaje(viaje_id_seleccionado)
-                        st.success("Viaje eliminado")
-                        st.rerun()
+                    col_ed, col_el = st.columns(2)
+                    with col_ed:
+                        if st.button("✏️ Editar este viaje", key=f"btn_editar_{viaje_id_seleccionado}"):
+                            st.session_state.editando_viaje_id = viaje_id_seleccionado
+                    with col_el:
+                        if st.button("🗑️ Eliminar este viaje", type="secondary"):
+                            db.eliminar_viaje(viaje_id_seleccionado)
+                            st.success("Viaje eliminado")
+                            st.rerun()
+
+                    # ---------------- FORMULARIO DE EDICIÓN ----------------
+                    if st.session_state.get('editando_viaje_id') == viaje_id_seleccionado:
+                        st.divider()
+                        st.markdown("### ✏️ Editar Viaje")
+                        st.caption("Ajusta los valores necesarios. Los costos fijos (nómina, mantenimiento, seguros, etc.) se recalculan automáticamente con las fórmulas vigentes.")
+
+                        placas_disponibles = [t.placa for t in st.session_state.tractomulas]
+                        conductores_disponibles = [c.nombre for c in st.session_state.conductores]
+                        rutas_disponibles = [f"{r.origen} → {r.destino}" for r in st.session_state.rutas]
+
+                        placa_actual = viaje[2]
+                        conductor_actual = viaje[3]
+                        ruta_actual_str = f"{viaje[4]} → {viaje[5]}"
+
+                        idx_placa = placas_disponibles.index(placa_actual) if placa_actual in placas_disponibles else 0
+                        idx_conductor = conductores_disponibles.index(conductor_actual) if conductor_actual in conductores_disponibles else 0
+                        idx_ruta = rutas_disponibles.index(ruta_actual_str) if ruta_actual_str in rutas_disponibles else 0
+
+                        if not placas_disponibles or not conductores_disponibles or not rutas_disponibles:
+                            st.error("⚠️ No se puede editar: faltan tractomulas, conductores o rutas registradas actualmente.")
+                        else:
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                edit_placa = st.selectbox("Tractomula", placas_disponibles, index=idx_placa, key="edit_placa")
+                                edit_conductor = st.selectbox("Conductor", conductores_disponibles, index=idx_conductor, key="edit_conductor")
+                                edit_ruta_str = st.selectbox("Ruta", rutas_disponibles, index=idx_ruta, key="edit_ruta")
+                                edit_dias = st.number_input("Días del viaje", min_value=1, value=int(viaje[7]), step=1, key="edit_dias")
+                                edit_fecha_viaje = st.date_input(
+                                    "📅 Fecha del viaje",
+                                    value=viaje[43] if len(viaje) > 43 and viaje[43] else datetime.now().date(),
+                                    key="edit_fecha_viaje"
+                                )
+                            with col2:
+                                edit_es_frontera = st.checkbox("¿Es viaje a frontera?", value=bool(viaje[8]), key="edit_frontera")
+                                edit_hubo_parqueo = st.checkbox("¿Hubo parqueo?", value=bool(viaje[9]), key="edit_parqueo")
+                                edit_hubo_ant_empresa = st.checkbox("¿Hubo anticipo empresa?", value=bool(viaje[36]), key="edit_ant_empresa")
+
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                edit_flypass_texto = st.text_input("Flypass (COP)", value=formatear_numero(viaje[20]) if viaje[20] else "", key="edit_flypass")
+                                edit_flypass = limpiar_numero(edit_flypass_texto)
+                                edit_peajes_texto = st.text_input("Peajes (COP)", value=formatear_numero(viaje[21]) if viaje[21] else "", key="edit_peajes")
+                                edit_peajes = limpiar_numero(edit_peajes_texto)
+                                edit_urea_texto = st.text_input("Urea y/o ACPM (COP)", value=formatear_numero(viaje[40]) if len(viaje) > 40 and viaje[40] else "", key="edit_urea")
+                                edit_urea = limpiar_numero(edit_urea_texto)
+                            with col2:
+                                edit_hotel_texto = st.text_input("Hotel (COP)", value=formatear_numero(viaje[23]) if viaje[23] else "", key="edit_hotel")
+                                edit_hotel = limpiar_numero(edit_hotel_texto)
+                                edit_comida_texto = st.text_input("Comida (COP)", value=formatear_numero(viaje[24]) if viaje[24] else "", key="edit_comida")
+                                edit_comida = limpiar_numero(edit_comida_texto)
+                                edit_transporte_texto = st.text_input("Transporte (COP)", value=formatear_numero(viaje[41]) if len(viaje) > 41 and viaje[41] else "", key="edit_transporte")
+                                edit_transporte = limpiar_numero(edit_transporte_texto)
+                            with col3:
+                                edit_propina_texto = st.text_input("Propina/Comisión (COP)", value=formatear_numero(viaje[42]) if len(viaje) > 42 and viaje[42] else "", key="edit_propina")
+                                edit_propina = limpiar_numero(edit_propina_texto)
+                                edit_cargue_texto = st.text_input("Cargue/Descargue (COP)", value=formatear_numero(viaje[26]) if viaje[26] else "", key="edit_cargue")
+                                edit_cargue = limpiar_numero(edit_cargue_texto)
+                                edit_otros_texto = st.text_input("Otros (COP)", value=formatear_numero(viaje[27]) if viaje[27] else "", key="edit_otros")
+                                edit_otros = limpiar_numero(edit_otros_texto)
+
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                edit_valor_flete_texto = st.text_input("Valor del Flete (COP)", value=formatear_numero(viaje[31]) if viaje[31] else "", key="edit_flete")
+                                edit_valor_flete = limpiar_numero(edit_valor_flete_texto)
+                            with col2:
+                                edit_anticipo_texto = st.text_input("Anticipo (COP)", value=formatear_numero(viaje[34]) if viaje[34] else "", key="edit_anticipo")
+                                edit_anticipo = limpiar_numero(edit_anticipo_texto)
+
+                            edit_observaciones = st.text_area("Observaciones", value=viaje[39] if viaje[39] else "", key="edit_obs")
+
+                            col_guardar, col_cancelar = st.columns(2)
+                            with col_guardar:
+                                if st.button("💾 Guardar Cambios", type="primary", key="guardar_edicion"):
+                                    edit_tractomula_obj = next(t for t in st.session_state.tractomulas if t.placa == edit_placa)
+                                    edit_conductor_obj = next(c for c in st.session_state.conductores if c.nombre == edit_conductor)
+                                    edit_ruta_obj = next(r for r in st.session_state.rutas if f"{r.origen} → {r.destino}" == edit_ruta_str)
+
+                                    calculadora_editada = CalculadoraCostos(
+                                        edit_tractomula_obj, edit_conductor_obj, edit_ruta_obj,
+                                        edit_dias, edit_es_frontera, edit_hubo_parqueo,
+                                        edit_flypass, edit_peajes, edit_urea, edit_hotel, edit_comida,
+                                        edit_transporte, edit_propina, edit_cargue, edit_otros,
+                                        edit_valor_flete, edit_anticipo, edit_hubo_ant_empresa, datos
+                                    )
+                                    exito = db.actualizar_viaje(viaje_id_seleccionado, calculadora_editada, edit_fecha_viaje, edit_observaciones)
+                                    if exito:
+                                        st.success("✅ Viaje actualizado correctamente")
+                                        del st.session_state.editando_viaje_id
+                                        if 'ultima_busqueda' in st.session_state:
+                                            del st.session_state.ultima_busqueda
+                                        st.rerun()
+                            with col_cancelar:
+                                if st.button("✖️ Cancelar Edición", key="cancelar_edicion"):
+                                    del st.session_state.editando_viaje_id
+                                    st.rerun()
 
             st.subheader("📥 Exportar Resultados")
             if st.button("Descargar en Excel"):
@@ -2356,7 +2507,7 @@ def main():
     # ==================== TAB 8: LIQUIDACIONES DE CONDUCTORES ====================
     with tab8:
         st.header("💵 Liquidaciones de Conductores")
-        st.caption("Calcula lo que hay que pagarle a cada conductor en un periodo (ej. quincena): Nómina + Comisiones − Anticipos ya entregados.")
+        st.caption("Muestra cuántos viajes hizo el conductor, en qué placas, y el Total de Comisiones a pagar en el periodo (ej. quincena).")
 
         st.subheader("📝 Generar Nueva Liquidación")
         col1, col2, col3 = st.columns(3)
@@ -2383,31 +2534,26 @@ def main():
             st.success(f"Se encontraron {len(df_viajes_liq)} viajes de {st.session_state.conductor_liq_actual} en el periodo seleccionado.")
 
             df_mostrar_liq = df_viajes_liq.copy()
-            df_mostrar_liq['nomina_conductor'] = df_mostrar_liq['nomina_conductor'].apply(lambda x: f"${formatear_numero(x)}")
             df_mostrar_liq['comision_conductor'] = df_mostrar_liq['comision_conductor'].apply(lambda x: f"${formatear_numero(x)}")
-            df_mostrar_liq['anticipo'] = df_mostrar_liq['anticipo'].apply(lambda x: f"${formatear_numero(x)}")
-            df_mostrar_liq.columns = ['ID', 'Fecha Viaje', 'Origen', 'Destino', 'Nómina', 'Comisión', 'Anticipo']
+            df_mostrar_liq.columns = ['ID', 'Fecha Viaje', 'Placa', 'Origen', 'Destino', 'Comisión']
             st.dataframe(df_mostrar_liq, use_container_width=True, hide_index=True)
 
-            total_nomina_preview = float(df_viajes_liq['nomina_conductor'].sum())
+            cantidad_viajes_preview = len(df_viajes_liq)
+            placas_preview = ", ".join(sorted(df_viajes_liq['placa'].unique()))
             total_comisiones_preview = float(df_viajes_liq['comision_conductor'].sum())
-            total_anticipos_preview = float(df_viajes_liq['anticipo'].sum())
-            total_a_pagar_preview = total_nomina_preview + total_comisiones_preview - total_anticipos_preview
 
-            col1, col2, col3, col4 = st.columns(4)
+            col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("Total Nómina", f"${formatear_numero(total_nomina_preview)}")
+                st.metric("🚛 Cantidad de Viajes", cantidad_viajes_preview)
             with col2:
-                st.metric("Total Comisiones", f"${formatear_numero(total_comisiones_preview)}")
+                st.metric("Placas", placas_preview if placas_preview else "-")
             with col3:
-                st.metric("Total Anticipos", f"${formatear_numero(total_anticipos_preview)}")
-            with col4:
-                st.metric("💰 TOTAL A PAGAR", f"${formatear_numero(total_a_pagar_preview)}")
+                st.metric("💰 TOTAL A PAGAR (Comisiones)", f"${formatear_numero(total_comisiones_preview)}")
 
             observaciones_liq = st.text_area("Observaciones de la liquidación (opcional)", key="liq_obs")
 
             if st.button("💾 Guardar Liquidación", type="primary", key="liq_guardar"):
-                liquidacion_id, t_nom, t_com, t_ant, t_pagar = db.guardar_liquidacion(
+                liquidacion_id, n_viajes, placas_liq, t_com, t_pagar = db.guardar_liquidacion(
                     st.session_state.conductor_liq_actual,
                     st.session_state.periodo_liq_actual[0],
                     st.session_state.periodo_liq_actual[1],
@@ -2454,12 +2600,10 @@ def main():
                     with col1:
                         st.write(f"**Conductor:** {liq['conductor']}")
                         st.write(f"**Periodo:** {liq['periodo_inicio']} a {liq['periodo_fin']}")
-                        st.write(f"**Cantidad de Viajes:** {liq['cantidad_viajes']}")
-                        st.write(f"**Total Nómina:** ${formatear_numero(liq['total_nomina'])}")
+                        st.write(f"**🚛 Cantidad de Viajes:** {liq['cantidad_viajes']}")
+                        st.write(f"**Placas:** {liq['placas'] if liq['placas'] else '-'}")
                     with col2:
-                        st.write(f"**Total Comisiones:** ${formatear_numero(liq['total_comisiones'])}")
-                        st.write(f"**Total Anticipos:** ${formatear_numero(liq['total_anticipos'])}")
-                        st.write(f"**💰 TOTAL A PAGAR:** ${formatear_numero(liq['total_a_pagar'])}")
+                        st.write(f"**💰 TOTAL A PAGAR (Comisiones):** ${formatear_numero(liq['total_a_pagar'])}")
                         st.write(f"**Estado:** {liq['estado']}" + (f" (pagada el {liq['fecha_pago']})" if liq['fecha_pago'] else ""))
                     if liq['observaciones']:
                         st.caption(f"📝 {liq['observaciones']}")
