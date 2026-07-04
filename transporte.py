@@ -1,8 +1,22 @@
 """
 Sistema de Programación de Rutas y Cálculo de Costos para Tractomulas
-Versión 3.4 - Conectado a Supabase (PostgreSQL) - CORREGIDO
+Versión 4.0 - Conectado a Supabase (PostgreSQL) - ACTUALIZADO
 Contexto: Colombia
 Autor: Sistema de Gestión de Transporte de Carga
+
+CAMBIOS EN ESTA VERSIÓN (v4.0):
+- Comisión conductor actualizada: Urbano ahora es $120.000 x días (antes fijo $100.000),
+  Frontera $565.000 (antes $500.000), Regional $200.000 (antes $180.000),
+  Aguachica $360.000 (antes $350.000), NUEVA categoría Riohacha $350.000
+- Nuevos conceptos de gasto variable: Urea y/o ACPM, Transporte, Propina/Comisión
+- Punto de Equilibrio = Valor del Flete x 40% (antes Total Gastos / 0.5)
+- Legalización y Total Gastos incluyen los 3 conceptos nuevos
+- Las rutas ahora guardan valores por defecto para los gastos variables
+  (Flypass, Peajes, Urea/ACPM, Hotel, Comida, Transporte, Propina/Comisión,
+  Cargue/Descargue, Otros) para no tener que escribirlos en cada viaje
+- CORREGIDO: bug de diciembre en filtro de fechas (Tab 7)
+- CORREGIDO: guardar_ruta ahora sí devuelve el ID (usa RETURNING id)
+- CORREGIDO: se eliminaron las 3 definiciones duplicadas de obtener_rutas()
 """
 
 import streamlit as st
@@ -10,7 +24,7 @@ import re
 import psycopg2
 from psycopg2 import sql
 from datetime import datetime, timedelta
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Dict
 import io
 from openpyxl import Workbook
@@ -50,7 +64,6 @@ def formatear_decimal(valor, decimales=2):
         return "0,00"
     try:
         formatted = f"{float(valor):,.{decimales}f}"
-        # Reemplazar separadores: primero decimales, luego miles
         formatted = formatted.replace(',', 'TEMP')
         formatted = formatted.replace('.', ',')
         formatted = formatted.replace('TEMP', '.')
@@ -64,14 +77,13 @@ def limpiar_numero(texto):
     if not texto:
         return 0.0
     try:
-        # Remover puntos de miles y reemplazar coma decimal por punto
         texto = str(texto).replace('.', '').replace(',', '.')
         return float(texto)
     except:
         return 0.0
 
 
-# ==================== BASE DE DATOS SUPABASE (CORREGIDA V2) ====================
+# ==================== BASE DE DATOS SUPABASE ====================
 class DatabaseManager:
     """Gestor de base de datos Supabase (PostgreSQL) para trazabilidad"""
 
@@ -83,12 +95,12 @@ class DatabaseManager:
         return psycopg2.connect(self.db_url)
 
     def init_database(self):
-        """Crea las tablas si no existen (Sintaxis PostgreSQL)"""
+        """Crea las tablas si no existen y migra columnas nuevas (Sintaxis PostgreSQL)"""
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
 
-            # Tabla Viajes v4 (Versión actualizada)
+            # Tabla Viajes v4
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS viajes_v4 (
                     id SERIAL PRIMARY KEY,
@@ -134,6 +146,11 @@ class DatabaseManager:
                 )
             ''')
 
+            # --- MIGRACIÓN: nuevas columnas para conceptos nuevos ---
+            cursor.execute("ALTER TABLE viajes_v4 ADD COLUMN IF NOT EXISTS urea_acpm REAL DEFAULT 0")
+            cursor.execute("ALTER TABLE viajes_v4 ADD COLUMN IF NOT EXISTS transporte REAL DEFAULT 0")
+            cursor.execute("ALTER TABLE viajes_v4 ADD COLUMN IF NOT EXISTS propina_comision REAL DEFAULT 0")
+
             # Tabla de tractomulas
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS tractomulas (
@@ -166,6 +183,18 @@ class DatabaseManager:
                 )
             ''')
 
+            # --- MIGRACIÓN: nueva categoría Riohacha + valores por defecto de gastos variables ---
+            cursor.execute("ALTER TABLE rutas ADD COLUMN IF NOT EXISTS es_riohacha INTEGER DEFAULT 0")
+            cursor.execute("ALTER TABLE rutas ADD COLUMN IF NOT EXISTS default_flypass REAL DEFAULT 0")
+            cursor.execute("ALTER TABLE rutas ADD COLUMN IF NOT EXISTS default_peajes REAL DEFAULT 0")
+            cursor.execute("ALTER TABLE rutas ADD COLUMN IF NOT EXISTS default_urea_acpm REAL DEFAULT 0")
+            cursor.execute("ALTER TABLE rutas ADD COLUMN IF NOT EXISTS default_hotel REAL DEFAULT 0")
+            cursor.execute("ALTER TABLE rutas ADD COLUMN IF NOT EXISTS default_comida REAL DEFAULT 0")
+            cursor.execute("ALTER TABLE rutas ADD COLUMN IF NOT EXISTS default_transporte REAL DEFAULT 0")
+            cursor.execute("ALTER TABLE rutas ADD COLUMN IF NOT EXISTS default_propina_comision REAL DEFAULT 0")
+            cursor.execute("ALTER TABLE rutas ADD COLUMN IF NOT EXISTS default_cargue_descargue REAL DEFAULT 0")
+            cursor.execute("ALTER TABLE rutas ADD COLUMN IF NOT EXISTS default_otros REAL DEFAULT 0")
+
             conn.commit()
             conn.close()
         except Exception as e:
@@ -177,57 +206,55 @@ class DatabaseManager:
             conn = self.get_connection()
             cursor = conn.cursor()
             costos = calculadora.calcular_costos_totales()
-            
-            # --- CORRECCIÓN DE HORA ---
-            # El servidor está en UTC, así que restamos 5 horas para tener hora Colombia
+
             hora_colombia = datetime.now() - timedelta(hours=5)
             fecha_actual = hora_colombia.strftime('%Y-%m-%d %H:%M:%S')
-            # --------------------------
 
-            # 1. Preparamos los datos en una tupla ordenada (39 elementos)
             datos_viaje = (
-                fecha_actual,                                   # 1 (FECHA CORREGIDA)
-                str(calculadora.tractomula.placa),              # 2
-                str(calculadora.conductor.nombre),              # 3
-                str(calculadora.ruta.origen),                   # 4
-                str(calculadora.ruta.destino),                  # 5
-                float(calculadora.ruta.distancia_km),           # 6
-                int(calculadora.dias_viaje),                    # 7
-                1 if calculadora.es_frontera else 0,            # 8
-                1 if calculadora.hubo_parqueo else 0,           # 9
-                costos['nomina_admin'],                         # 10
-                costos['nomina_conductor'],                     # 11
-                costos['comision_conductor'],                   # 12
-                costos['mantenimiento'],                        # 13
-                costos['seguros'],                              # 14
-                costos['tecnomecanica'],                        # 15
-                costos['llantas'],                              # 16
-                costos['aceite'],                               # 17
-                costos['combustible'],                          # 18
-                costos['galones_necesarios'],                   # 19
-                float(calculadora.flypass),                     # 20
-                float(calculadora.peajes),                      # 21
-                costos['cruce_frontera'],                       # 22
-                float(calculadora.hotel),                       # 23
-                float(calculadora.comida),                      # 24
-                costos['parqueo'],                              # 25
-                float(calculadora.cargue_descargue),            # 26
-                float(calculadora.otros),                       # 27
-                costos['total_gastos'],                         # 28
-                costos['legalizacion'],                         # 29
-                costos['punto_equilibrio'],                     # 30
-                float(calculadora.valor_flete),                 # 31
-                costos['utilidad'],                             # 32
-                costos['rentabilidad'],                         # 33
-                float(calculadora.anticipo),                    # 34
-                costos['saldo'],                                # 35
-                1 if calculadora.hubo_anticipo_empresa else 0,  # 36
-                costos['ant_empresa'],                          # 37
-                costos['saldo_empresa'],                        # 38
-                str(observaciones)                              # 39
+                fecha_actual,
+                str(calculadora.tractomula.placa),
+                str(calculadora.conductor.nombre),
+                str(calculadora.ruta.origen),
+                str(calculadora.ruta.destino),
+                float(calculadora.ruta.distancia_km),
+                int(calculadora.dias_viaje),
+                1 if calculadora.es_frontera else 0,
+                1 if calculadora.hubo_parqueo else 0,
+                costos['nomina_admin'],
+                costos['nomina_conductor'],
+                costos['comision_conductor'],
+                costos['mantenimiento'],
+                costos['seguros'],
+                costos['tecnomecanica'],
+                costos['llantas'],
+                costos['aceite'],
+                costos['combustible'],
+                costos['galones_necesarios'],
+                float(calculadora.flypass),
+                float(calculadora.peajes),
+                costos['cruce_frontera'],
+                float(calculadora.hotel),
+                float(calculadora.comida),
+                costos['parqueo'],
+                float(calculadora.cargue_descargue),
+                float(calculadora.otros),
+                costos['total_gastos'],
+                costos['legalizacion'],
+                costos['punto_equilibrio'],
+                float(calculadora.valor_flete),
+                costos['utilidad'],
+                costos['rentabilidad'],
+                float(calculadora.anticipo),
+                costos['saldo'],
+                1 if calculadora.hubo_anticipo_empresa else 0,
+                costos['ant_empresa'],
+                costos['saldo_empresa'],
+                str(observaciones),
+                float(calculadora.urea_acpm),
+                float(calculadora.transporte),
+                float(calculadora.propina_comision),
             )
 
-            # 2. Ejecutamos la consulta
             sql_insert = '''
                 INSERT INTO viajes_v4 (
                     fecha_creacion, placa, conductor, origen, destino, distancia_km,
@@ -237,12 +264,14 @@ class DatabaseManager:
                     cruce_frontera, hotel, comida, parqueo, cargue_descargue, otros,
                     total_gastos, legalizacion, punto_equilibrio, valor_flete,
                     utilidad, rentabilidad, anticipo, saldo, hubo_anticipo_empresa,
-                    ant_empresa, saldo_empresa, observaciones
+                    ant_empresa, saldo_empresa, observaciones,
+                    urea_acpm, transporte, propina_comision
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s
                 ) RETURNING id
             '''
 
@@ -264,7 +293,6 @@ class DatabaseManager:
             return None
 
     def obtener_todos_viajes(self):
-        """Obtiene todos los viajes ordenados por fecha"""
         conn = self.get_connection()
         query = "SELECT * FROM viajes_v4 ORDER BY fecha_creacion DESC"
         df = pd.read_sql_query(query, conn)
@@ -272,7 +300,6 @@ class DatabaseManager:
         return df
 
     def buscar_viajes(self, fecha_inicio=None, fecha_fin=None, placa=None, conductor=None, origen=None, destino=None):
-        """Busca viajes con filtros"""
         conn = self.get_connection()
         query = "SELECT * FROM viajes_v4 WHERE 1=1"
         params = []
@@ -300,7 +327,6 @@ class DatabaseManager:
         return df
 
     def obtener_viaje_por_id(self, viaje_id):
-        """Obtiene un viaje específico por ID"""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM viajes_v4 WHERE id = %s", (viaje_id,))
@@ -309,7 +335,6 @@ class DatabaseManager:
         return viaje
 
     def eliminar_viaje(self, viaje_id):
-        """Elimina un viaje por ID"""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("DELETE FROM viajes_v4 WHERE id = %s", (viaje_id,))
@@ -317,7 +342,6 @@ class DatabaseManager:
         conn.close()
 
     def obtener_estadisticas(self):
-        """Obtiene estadísticas generales"""
         conn = self.get_connection()
         cursor = conn.cursor()
         stats = {}
@@ -340,7 +364,6 @@ class DatabaseManager:
         return stats
 
     def obtener_dashboard_data(self):
-        """Obtiene datos para el dashboard"""
         conn = self.get_connection()
         cursor = conn.cursor()
         hoy = datetime.now()
@@ -408,7 +431,6 @@ class DatabaseManager:
             """)
             data['viajes_no_rentables'] = cursor.fetchall()
 
-            # Nuevas métricas para UT BRUTA, UT NETA, % UT
             cursor.execute("""
                 SELECT SUM(valor_flete) as ut_bruta, SUM(utilidad) as ut_neta
                 FROM viajes_v4 WHERE to_date(fecha_creacion, 'YYYY-MM-DD') >= %s
@@ -420,9 +442,8 @@ class DatabaseManager:
             data['ut_bruta'] = ut_bruta
             data['ut_neta'] = ut_neta
             data['porcentaje_ut'] = porcentaje_ut
-        
+
         except Exception:
-             # En caso de error (tabla vacía o no existe), retornar valores en cero
             data = {k: 0 for k in ['ut_bruta', 'ut_neta', 'porcentaje_ut']}
             data['mes_actual'] = {k: 0 for k in ['total_viajes', 'total_km', 'total_gastos', 'total_ingresos', 'total_utilidad', 'utilidad_promedio']}
             data['por_tractomula'] = []
@@ -435,7 +456,7 @@ class DatabaseManager:
         return data
 
     def obtener_totales_por_placa(self, fecha_inicio=None, fecha_fin=None):
-        """Obtiene totales acumulados por placa con filtros de fecha"""
+        """Obtiene totales acumulados por placa con filtros de fecha (incluye conceptos nuevos)"""
         conn = self.get_connection()
         query = """
             SELECT placa, SUM(valor_flete) as total_cxc, SUM(nomina_admin) as total_admin,
@@ -444,10 +465,12 @@ class DatabaseManager:
                    SUM(tecnomecanica) as total_tecnomecanica, SUM(llantas) as total_llantas,
                    SUM(aceite) as total_aceite, SUM(combustible) as total_combustible,
                    SUM(flypass) as total_flypass, SUM(peajes) as total_peajes,
+                   SUM(urea_acpm) as total_urea_acpm,
                    SUM(cruce_frontera) as total_cruce_frontera, SUM(hotel) as total_hotel,
-                   SUM(comida) as total_comida, SUM(parqueo) as total_parqueo,
+                   SUM(comida) as total_comida, SUM(transporte) as total_transporte,
+                   SUM(parqueo) as total_parqueo, SUM(propina_comision) as total_propina_comision,
                    SUM(cargue_descargue) as total_cargue_descargue, SUM(otros) as total_otros,
-                   SUM(legalizacion) as total_legalizacion, SUM(anticipo) as total_anticipo,
+                   SUM(legalizacion) as total_legalizacion, SUM(anticipo) as total_anticipos,
                    SUM(saldo) as total_saldo, SUM(ant_empresa) as total_ant_empresa,
                    SUM(saldo_empresa) as total_saldo_empresa
             FROM viajes_v4 WHERE 1=1
@@ -463,22 +486,28 @@ class DatabaseManager:
 
         try:
             df = pd.read_sql_query(query, conn, params=params)
-            # Calcular compuestos
             if not df.empty:
+                # TOTAL GASTOS = suma de todos los conceptos (incluye los 3 nuevos)
                 df['total_gastos'] = (
                     df['total_admin'] + df['total_parafiscales'] + df['total_comision'] +
                     df['total_mantenimiento'] + df['total_seguros'] + df['total_tecnomecanica'] +
                     df['total_llantas'] + df['total_aceite'] + df['total_combustible'] +
-                    df['total_flypass'] + df['total_peajes'] + df['total_cruce_frontera'] +
-                    df['total_hotel'] + df['total_comida'] + df['total_parqueo'] +
+                    df['total_flypass'] + df['total_peajes'] + df['total_urea_acpm'] +
+                    df['total_cruce_frontera'] + df['total_hotel'] + df['total_comida'] +
+                    df['total_transporte'] + df['total_parqueo'] + df['total_propina_comision'] +
                     df['total_cargue_descargue'] + df['total_otros']
                 )
-                df['total_punto_equilibrio'] = df['total_gastos'] / 0.5
+                # PUNTO DE EQUILIBRIO = TOTAL CXC x 40%
+                df['total_punto_equilibrio'] = df['total_cxc'] * 0.40
+                # UT TOTAL = TOTAL CXC - TOTAL GASTOS
                 df['total_ut'] = df['total_cxc'] - df['total_gastos']
+                # RENTABILIDAD = UT TOTAL / TOTAL CXC (en %)
                 df['total_rentabilidad'] = (df['total_ut'] / df['total_cxc'] * 100).where(df['total_cxc'] != 0, 0)
+                # SALDO = TOTAL ANTICIPOS - TOTAL LEGALIZACION
+                df['total_saldo'] = df['total_anticipos'] - df['total_legalizacion']
         except Exception:
             df = pd.DataFrame()
-            
+
         conn.close()
         return df
 
@@ -552,47 +581,60 @@ class DatabaseManager:
         conn.commit()
         conn.close()
 
-    # Métodos para rutas
-   # --- Asegúrate de que esta línea esté alineada con los otros métodos de la clase ---
+    # ---------------- Métodos para rutas (CORREGIDOS) ----------------
     def guardar_ruta(self, ruta):
+        """Guarda una ruta, incluye Riohacha y los valores por defecto de gastos variables.
+        CORREGIDO: ahora usa RETURNING id para devolver el ID correctamente."""
         conn = self.get_connection()
         cursor = conn.cursor()
-        
-        # Insertamos explícitamente ignorando columnas basura
         cursor.execute('''
-            INSERT INTO rutas (origen, destino, distancia_km, es_frontera, es_regional, es_aguachica)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO rutas (
+                origen, destino, distancia_km, es_frontera, es_regional, es_aguachica,
+                es_riohacha, default_flypass, default_peajes, default_urea_acpm,
+                default_hotel, default_comida, default_transporte,
+                default_propina_comision, default_cargue_descargue, default_otros
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
         ''', (
-            ruta.origen, 
-            ruta.destino, 
+            ruta.origen,
+            ruta.destino,
             ruta.distancia_km,
             1 if ruta.es_frontera else 0,
             1 if ruta.es_regional else 0,
-            1 if ruta.es_aguachica else 0
+            1 if ruta.es_aguachica else 0,
+            1 if ruta.es_riohacha else 0,
+            ruta.default_flypass,
+            ruta.default_peajes,
+            ruta.default_urea_acpm,
+            ruta.default_hotel,
+            ruta.default_comida,
+            ruta.default_transporte,
+            ruta.default_propina_comision,
+            ruta.default_cargue_descargue,
+            ruta.default_otros,
         ))
+        result = cursor.fetchone()
+        ruta_id = result[0] if result else None
         conn.commit()
-        
-        try:
-            ruta_id = cursor.fetchone()[0]
-        except:
-            try:
-                ruta_id = cursor.lastrowid
-            except:
-                ruta_id = None
         conn.close()
         return ruta_id
 
     def obtener_rutas(self):
+        """Obtiene rutas con columnas explícitas (incluye Riohacha y defaults).
+        CORREGIDO: se eliminaron las 2 definiciones duplicadas que existían antes;
+        esta es la única versión."""
         conn = self.get_connection()
         cursor = conn.cursor()
-        
-        # Leemos explícitamente ignorando columnas basura
         cursor.execute("""
-            SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica 
-            FROM rutas 
+            SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica,
+                   es_riohacha, default_flypass, default_peajes, default_urea_acpm,
+                   default_hotel, default_comida, default_transporte,
+                   default_propina_comision, default_cargue_descargue, default_otros
+            FROM rutas
             ORDER BY origen, destino
         """)
-        
+
         rutas = []
         for row in cursor.fetchall():
             rutas.append(Ruta(
@@ -601,61 +643,21 @@ class DatabaseManager:
                 distancia_km=row[3],
                 es_frontera=bool(row[4]),
                 es_regional=bool(row[5]),
-                es_aguachica=bool(row[6])
+                es_aguachica=bool(row[6]),
+                es_riohacha=bool(row[7]),
+                default_flypass=row[8] or 0.0,
+                default_peajes=row[9] or 0.0,
+                default_urea_acpm=row[10] or 0.0,
+                default_hotel=row[11] or 0.0,
+                default_comida=row[12] or 0.0,
+                default_transporte=row[13] or 0.0,
+                default_propina_comision=row[14] or 0.0,
+                default_cargue_descargue=row[15] or 0.0,
+                default_otros=row[16] or 0.0,
             ))
         conn.close()
         return rutas
 
-    def obtener_rutas(self):
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        
-        # AQUÍ ESTÁ EL TRUCO: Pedimos los nombres exactos para saltarnos la columna basura
-        cursor.execute("""
-            SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica 
-            FROM rutas 
-            ORDER BY origen, destino
-        """)
-        
-        rutas = []
-        for row in cursor.fetchall():
-            rutas.append(Ruta(
-                origen=row[1],
-                destino=row[2],
-                distancia_km=row[3],
-                es_frontera=bool(row[4]),
-                es_regional=bool(row[5]),   # Ahora SÍ es la columna 5 real
-                es_aguachica=bool(row[6])   # Ahora SÍ es la columna 6 real
-            ))
-        conn.close()
-        return rutas
-
-    def obtener_rutas(self):
-        """Obtiene rutas con columnas explícitas para evitar el error de 'es_urbano'"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        
-        # ⚠️ IMPORTANTE: Pedimos las columnas por nombre para saltarnos la columna 'es_urbano'
-        # que tienes en Supabase y que está corriendo todos los datos.
-        cursor.execute("""
-            SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica 
-            FROM rutas 
-            ORDER BY origen, destino
-        """)
-        
-        rutas = []
-        for row in cursor.fetchall():
-            # Ahora estamos 100% seguros de qué dato es cual:
-            rutas.append(Ruta(
-                origen=row[1],             # Columna origen
-                destino=row[2],            # Columna destino
-                distancia_km=row[3],       # Columna distancia
-                es_frontera=bool(row[4]),  # Columna es_frontera
-                es_regional=bool(row[5]),  # Columna es_regional (AHORA SÍ ES CORRECTO)
-                es_aguachica=bool(row[6])  # Columna es_aguachica
-            ))
-        conn.close()
-        return rutas
     def eliminar_ruta(self, ruta_id):
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -686,6 +688,17 @@ class Ruta:
     es_frontera: bool
     es_regional: bool = False
     es_aguachica: bool = False
+    es_riohacha: bool = False  # NUEVO
+    # Valores por defecto para gastos variables (se autocompletan al elegir la ruta)
+    default_flypass: float = 0.0
+    default_peajes: float = 0.0
+    default_urea_acpm: float = 0.0
+    default_hotel: float = 0.0
+    default_comida: float = 0.0
+    default_transporte: float = 0.0
+    default_propina_comision: float = 0.0
+    default_cargue_descargue: float = 0.0
+    default_otros: float = 0.0
 
 
 # ==================== DATOS COLOMBIANOS ====================
@@ -694,10 +707,14 @@ class DatosColombia:
     NOMINA_ADMIN_BASE = 1300000
     NOMINA_ADMIN_DIVISOR = 14
     NOMINA_CONDUCTOR_DIA = 20000
-    COMISION_FRONTERA = 500000
-    COMISION_REGIONAL = 180000
-    COMISION_AGUACHICA = 350000
-    COMISION_NO_FRONTERA = 100000
+
+    # --- Comisión conductor (ACTUALIZADA) ---
+    COMISION_URBANO_DIA = 120000     # antes: fijo $100.000 -> ahora: $120.000 x días de viaje
+    COMISION_FRONTERA = 565000       # antes: $500.000
+    COMISION_REGIONAL = 200000       # antes: $180.000
+    COMISION_AGUACHICA = 360000      # antes: $350.000
+    COMISION_RIOACHA = 350000        # NUEVO
+
     MANTENIMIENTO_MENSUAL = 1500000
     SEGURO_1 = 1400000
     SEGURO_2 = 6000000
@@ -711,7 +728,7 @@ class DatosColombia:
     CRUCE_FRONTERA = 556000
     PARQUEO_DIA = 15000
     MARGEN_ANT_EMPRESA = 0.90
-    DIVISOR_PUNTO_EQUILIBRIO = 0.5
+    PUNTO_EQUILIBRIO_PORCENTAJE = 0.40   # ACTUALIZADO: antes era Total Gastos / 0.5
 
 
 # ==================== ASIGNACION DE CONDUCTORES ====================
@@ -737,11 +754,12 @@ PLACA_CONDUCTOR = {
 
 # ==================== CALCULADORA DE COSTOS ====================
 class CalculadoraCostos:
-    """Calcula todos los costos del viaje con fórmulas reales ACTUALIZADAS"""
+    """Calcula todos los costos del viaje con fórmulas ACTUALIZADAS v4.0"""
 
     def __init__(self, tractomula: Tractomula, conductor: Conductor, ruta: Ruta,
                  dias_viaje: int, es_frontera: bool, hubo_parqueo: bool,
-                 flypass: float, peajes: float, hotel: float, comida: float,
+                 flypass: float, peajes: float, urea_acpm: float, hotel: float,
+                 comida: float, transporte: float, propina_comision: float,
                  cargue_descargue: float, otros: float, valor_flete: float,
                  anticipo: float, hubo_anticipo_empresa: bool, datos: DatosColombia):
         self.tractomula = tractomula
@@ -752,8 +770,11 @@ class CalculadoraCostos:
         self.hubo_parqueo = hubo_parqueo
         self.flypass = flypass
         self.peajes = peajes
+        self.urea_acpm = urea_acpm            # NUEVO
         self.hotel = hotel
         self.comida = comida
+        self.transporte = transporte          # NUEVO
+        self.propina_comision = propina_comision  # NUEVO
         self.cargue_descargue = cargue_descargue
         self.otros = otros
         self.valor_flete = valor_flete
@@ -768,21 +789,23 @@ class CalculadoraCostos:
         return self.datos.NOMINA_CONDUCTOR_DIA * self.dias_viaje
 
     def calcular_comision_conductor(self) -> float:
-        # 1. Si es Aguachica -> 350.000
+        """ACTUALIZADO:
+        - Aguachica -> $360.000 fijo
+        - Riohacha  -> $350.000 fijo (NUEVO)
+        - Regional  -> $200.000 fijo
+        - Frontera  -> $565.000 fijo
+        - Urbano/Normal -> $120.000 x días de viaje (antes era fijo $100.000)
+        """
         if self.ruta.es_aguachica:
-            return self.datos.COMISION_AGUACHICA 
-            
-        # 2. Si es Regional -> 180.000
+            return self.datos.COMISION_AGUACHICA
+        elif self.ruta.es_riohacha:
+            return self.datos.COMISION_RIOACHA
         elif self.ruta.es_regional:
             return self.datos.COMISION_REGIONAL
-            
-        # 3. Si es Frontera -> 500.000
         elif self.es_frontera:
             return self.datos.COMISION_FRONTERA
-            
-        # 4. Si no es nada de lo anterior (Urbano/Normal) -> 100.000
         else:
-            return self.datos.COMISION_NO_FRONTERA
+            return self.datos.COMISION_URBANO_DIA * self.dias_viaje
 
     def calcular_mantenimiento(self) -> float:
         return (self.datos.MANTENIMIENTO_MENSUAL / 30) * self.dias_viaje
@@ -822,8 +845,10 @@ class CalculadoraCostos:
         return self.datos.PARQUEO_DIA * self.dias_viaje if self.hubo_parqueo else 0
 
     def calcular_legalizacion(self) -> float:
-        return (self.peajes + self.calcular_cruce_frontera() + self.hotel +
-                self.comida + self.calcular_parqueo() + self.cargue_descargue + self.otros)
+        """ACTUALIZADO: incluye Urea/ACPM, Transporte y Propina/Comisión"""
+        return (self.peajes + self.urea_acpm + self.calcular_cruce_frontera() + self.hotel +
+                self.comida + self.transporte + self.calcular_parqueo() +
+                self.propina_comision + self.cargue_descargue + self.otros)
 
     def calcular_saldo(self) -> float:
         legalizacion = self.calcular_legalizacion()
@@ -849,16 +874,21 @@ class CalculadoraCostos:
         cruce_frontera = self.calcular_cruce_frontera()
         parqueo = self.calcular_parqueo()
 
+        # TOTAL GASTOS ACTUALIZADO: incluye Urea/ACPM, Transporte y Propina/Comisión
         total_gastos = (
             nomina_admin + nomina_conductor + comision_conductor + mantenimiento +
             seguros + tecnomecanica + llantas + aceite + combustible +
-            self.flypass + self.peajes + cruce_frontera + self.hotel +
-            self.comida + parqueo + self.cargue_descargue + self.otros
+            self.flypass + self.peajes + self.urea_acpm + cruce_frontera + self.hotel +
+            self.comida + self.transporte + parqueo + self.propina_comision +
+            self.cargue_descargue + self.otros
         )
 
         legalizacion = self.calcular_legalizacion()
         saldo = self.calcular_saldo()
-        punto_equilibrio = total_gastos / self.datos.DIVISOR_PUNTO_EQUILIBRIO
+
+        # PUNTO DE EQUILIBRIO ACTUALIZADO: Valor del Flete x 40% (antes Total Gastos / 0.5)
+        punto_equilibrio = self.valor_flete * self.datos.PUNTO_EQUILIBRIO_PORCENTAJE
+
         utilidad = self.valor_flete - total_gastos
         rentabilidad = (utilidad / self.valor_flete * 100) if self.valor_flete > 0 else 0
         ant_empresa = self.calcular_ant_empresa()
@@ -909,6 +939,7 @@ Galones necesarios: {formatear_decimal(costos['galones_necesarios'])} gal
 Es frontera: {'Sí' if calculadora.es_frontera else 'No'}
 Es regional: {'Sí' if calculadora.ruta.es_regional else 'No'}
 Es Aguachica: {'Sí' if calculadora.ruta.es_aguachica else 'No'}
+Es Riohacha: {'Sí' if calculadora.ruta.es_riohacha else 'No'}
 Hubo parqueo: {'Sí' if calculadora.hubo_parqueo else 'No'}
 
 VEHÍCULO
@@ -936,12 +967,15 @@ DESGLOSE DE COSTOS
 9. Combustible:           ${formatear_numero(costos['combustible']):>18} COP
 10. Flypass:              ${formatear_numero(calculadora.flypass):>18} COP
 11. Peajes:               ${formatear_numero(calculadora.peajes):>18} COP
-12. Cruce Frontera:       ${formatear_numero(costos['cruce_frontera']):>18} COP
-13. Hotel:                ${formatear_numero(calculadora.hotel):>18} COP
-14. Comida:               ${formatear_numero(calculadora.comida):>18} COP
-15. Parqueo:              ${formatear_numero(costos['parqueo']):>18} COP
-16. Cargue/Descargue:     ${formatear_numero(calculadora.cargue_descargue):>18} COP
-17. Otros (engrase, etc): ${formatear_numero(calculadora.otros):>18} COP
+12. Urea y/o ACPM:        ${formatear_numero(calculadora.urea_acpm):>18} COP
+13. Cruce Frontera:       ${formatear_numero(costos['cruce_frontera']):>18} COP
+14. Hotel:                ${formatear_numero(calculadora.hotel):>18} COP
+15. Comida:               ${formatear_numero(calculadora.comida):>18} COP
+16. Transporte:           ${formatear_numero(calculadora.transporte):>18} COP
+17. Parqueo:              ${formatear_numero(costos['parqueo']):>18} COP
+18. Propina/Comisión:     ${formatear_numero(calculadora.propina_comision):>18} COP
+19. Cargue/Descargue:     ${formatear_numero(calculadora.cargue_descargue):>18} COP
+20. Otros (engrase, etc): ${formatear_numero(calculadora.otros):>18} COP
 {'='*70}
 
 RESULTADOS
@@ -968,7 +1002,6 @@ Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         output = io.BytesIO()
         wb = Workbook()
 
-        # Estilos
         header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
         header_font = Font(color="FFFFFF", bold=True, size=11)
         subheader_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
@@ -982,11 +1015,9 @@ Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             bottom=Side(style='thin')
         )
 
-        # Hoja de resumen
         ws_resumen = wb.active
         ws_resumen.title = "Resumen General"
 
-        # Título
         ws_resumen.merge_cells('A1:M1')
         cell = ws_resumen['A1']
         cell.value = "REPORTE DE COSTOS - TRANSPORTE DE CARGA COLOMBIA"
@@ -997,7 +1028,6 @@ Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         ws_resumen['A2'] = f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         ws_resumen['A2'].alignment = Alignment(horizontal='center')
 
-        # Encabezados
         row = 4
         headers = ['Ruta', 'Placa', 'Conductor', 'Distancia (km)', 'Días', 'Galones',
                    'Combustible', 'Total Gastos', 'Anticipo', 'Saldo', 'Valor Flete',
@@ -1011,7 +1041,6 @@ Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.border = border
 
-        # Datos de cada ruta
         row = 5
         for calc in calculadoras:
             costos = calc.calcular_costos_totales()
@@ -1053,19 +1082,16 @@ Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
             row += 1
 
-        # Ajustar anchos
         ws_resumen.column_dimensions['A'].width = 30
         ws_resumen.column_dimensions['B'].width = 12
         ws_resumen.column_dimensions['C'].width = 28
         for col in ['D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M']:
             ws_resumen.column_dimensions[col].width = 16
 
-        # Hojas detalladas por ruta
         for idx, calc in enumerate(calculadoras, start=1):
             costos = calc.calcular_costos_totales()
             ws = wb.create_sheet(title=f"Ruta {idx}")
 
-            # Título
             ws.merge_cells('A1:D1')
             ws['A1'] = f"{calc.ruta.origen} → {calc.ruta.destino}"
             ws['A1'].font = Font(size=14, bold=True, color="1F4E78")
@@ -1073,7 +1099,6 @@ Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
             row = 3
 
-            # DESGLOSE DE COSTOS
             ws.merge_cells(f'A{row}:D{row}')
             cell = ws[f'A{row}']
             cell.value = "DESGLOSE DE COSTOS"
@@ -1099,12 +1124,15 @@ Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                 ('9. Combustible', costos['combustible']),
                 ('10. Flypass', calc.flypass),
                 ('11. Peajes', calc.peajes),
-                ('12. Cruce Frontera', costos['cruce_frontera']),
-                ('13. Hotel', calc.hotel),
-                ('14. Comida', calc.comida),
-                ('15. Parqueo', costos['parqueo']),
-                ('16. Cargue/Descargue', calc.cargue_descargue),
-                ('17. Otros', calc.otros),
+                ('12. Urea y/o ACPM', calc.urea_acpm),
+                ('13. Cruce Frontera', costos['cruce_frontera']),
+                ('14. Hotel', calc.hotel),
+                ('15. Comida', calc.comida),
+                ('16. Transporte', calc.transporte),
+                ('17. Parqueo', costos['parqueo']),
+                ('18. Propina/Comisión', calc.propina_comision),
+                ('19. Cargue/Descargue', calc.cargue_descargue),
+                ('20. Otros', calc.otros),
             ]
 
             for concepto, monto in detalles_costos:
@@ -1115,7 +1143,6 @@ Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
             row += 1
 
-            # RESULTADOS
             ws.merge_cells(f'A{row}:D{row}')
             cell = ws[f'A{row}']
             cell.value = "RESULTADOS"
@@ -1153,7 +1180,6 @@ Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                         ws[f'B{row}'].number_format = '$#,##0'
                 row += 1
 
-            # Ajustar anchos
             ws.column_dimensions['A'].width = 30
             ws.column_dimensions['B'].width = 20
             ws.column_dimensions['C'].width = 15
@@ -1193,14 +1219,12 @@ def input_numero(label, value=0.0, min_value=0.0, step=1000.0, key=None, help=No
 
 # ==================== MANTENER SESIÓN ACTIVA ====================
 def mantener_app_activa():
-    """Mantiene la aplicación activa mostrando un contador discreto y refrescando automáticamente cada 4 minutos"""
     if 'ultima_actividad' not in st.session_state:
         st.session_state.ultima_actividad = datetime.now()
 
     tiempo_inactivo = datetime.now() - st.session_state.ultima_actividad
     segundos_inactivo = int(tiempo_inactivo.total_seconds())
 
-    # Auto-refresh cada 4 minutos (240 segundos)
     if segundos_inactivo > 240:
         st.session_state.ultima_actividad = datetime.now()
         st.rerun()
@@ -1224,7 +1248,6 @@ def main():
     st.title("🚛 Sistema de Cálculo de Costos para Transporte de Carga")
     st.markdown("**Sistema de Gestión de Flotas y Fletes**")
 
-    # Inicializar session state
     if 'datos' not in st.session_state:
         st.session_state.datos = DatosColombia()
     if 'db' not in st.session_state:
@@ -1232,7 +1255,6 @@ def main():
     if 'calculadoras' not in st.session_state:
         st.session_state.calculadoras = []
 
-    # Cargar datos de la base de datos
     if 'tractomulas' not in st.session_state:
         st.session_state.tractomulas = st.session_state.db.obtener_tractomulas()
     if 'conductores' not in st.session_state:
@@ -1243,7 +1265,6 @@ def main():
     datos = st.session_state.datos
     db = st.session_state.db
 
-    # Sidebar para configuración global
     with st.sidebar:
         st.header("⚙️ Configuración Global")
 
@@ -1255,26 +1276,27 @@ def main():
 
         st.divider()
         st.subheader("📊 Constantes del Negocio")
-        st.caption("Estos valores están fijos según tus fórmulas ACTUALIZADAS")
+        st.caption("Valores fijos según fórmulas ACTUALIZADAS v4.0")
         st.info(f"""
 **Nóminas:**
 - Admin base: ${formatear_numero(datos.NOMINA_ADMIN_BASE)} / 14
 - Conductor/día: ${formatear_numero(datos.NOMINA_CONDUCTOR_DIA)}
 
-**Comisiones:**
-- Aguachica: ${formatear_numero(datos.COMISION_AGUACHICA)}
+**Comisiones conductor:**
+- Urbano/Normal: ${formatear_numero(datos.COMISION_URBANO_DIA)} x día
 - Regional: ${formatear_numero(datos.COMISION_REGIONAL)}
+- Riohacha: ${formatear_numero(datos.COMISION_RIOACHA)}
+- Aguachica: ${formatear_numero(datos.COMISION_AGUACHICA)}
 - Frontera: ${formatear_numero(datos.COMISION_FRONTERA)}
-- Normal: ${formatear_numero(datos.COMISION_NO_FRONTERA)}
 
 **Otros:**
 - Tecnomecánica/año: ${formatear_numero(datos.TECNOMECANICA_ANUAL)}
 - Llantas: ${formatear_numero(datos.LLANTAS_COSTO)}
 - Cruce frontera: ${formatear_numero(datos.CRUCE_FRONTERA)}
 - Parqueo/día: ${formatear_numero(datos.PARQUEO_DIA)}
+- Punto de equilibrio: Valor Flete x {int(datos.PUNTO_EQUILIBRIO_PORCENTAJE*100)}%
         """)
 
-    # Tabs principales
     tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "📊 Dashboard",
         "1. Tractomulas",
@@ -1286,6 +1308,7 @@ def main():
         "7. Acumulado por Flota"
     ])
 
+    # ==================== TAB 0: DASHBOARD ====================
     with tab0:
         st.header("📊 Dashboard - Resumen de tu Negocio")
 
@@ -1328,7 +1351,6 @@ def main():
                 help="Total de viajes este mes"
             )
 
-        # Nuevas métricas UT BRUTA, UT NETA, % UT
         st.divider()
         st.subheader("💎 Indicadores de Utilidad")
 
@@ -1390,19 +1412,22 @@ def main():
         placa_seleccionada = st.selectbox("Selecciona una placa", sorted(PLACA_CONDUCTOR.keys()))
         if placa_seleccionada:
             df_totales = db.obtener_totales_por_placa()
-            df_placa = df_totales[df_totales['placa'] == placa_seleccionada]
-            if not df_placa.empty:
-                row = df_placa.iloc[0]
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Total CXC", f"${formatear_numero(row['total_cxc'])}")
-                    st.metric("Total Gastos", f"${formatear_numero(row['total_gastos'])}")
-                with col2:
-                    st.metric("Total UT", f"${formatear_numero(row['total_ut'])}")
-                    st.metric("Rentabilidad", f"{row['total_rentabilidad']:.1f}%")
-                with col3:
-                    st.metric("Punto Equilibrio", f"${formatear_numero(row['total_punto_equilibrio'])}")
-                    st.metric("Saldo Total", f"${formatear_numero(row['total_saldo'])}")
+            if not df_totales.empty:
+                df_placa = df_totales[df_totales['placa'] == placa_seleccionada]
+                if not df_placa.empty:
+                    row = df_placa.iloc[0]
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Total CXC", f"${formatear_numero(row['total_cxc'])}")
+                        st.metric("Total Gastos", f"${formatear_numero(row['total_gastos'])}")
+                    with col2:
+                        st.metric("Total UT", f"${formatear_numero(row['total_ut'])}")
+                        st.metric("Rentabilidad", f"{row['total_rentabilidad']:.1f}%")
+                    with col3:
+                        st.metric("Punto Equilibrio (40% CXC)", f"${formatear_numero(row['total_punto_equilibrio'])}")
+                        st.metric("Saldo Total", f"${formatear_numero(row['total_saldo'])}")
+                else:
+                    st.info("No hay datos para esta placa")
             else:
                 st.info("No hay datos para esta placa")
 
@@ -1416,6 +1441,7 @@ def main():
         else:
             st.info("No hay datos para comparar")
 
+    # ==================== TAB 1: TRACTOMULAS ====================
     with tab1:
         st.header("Tus Tractomulas")
         with st.form(key="form_tractomula"):
@@ -1456,40 +1482,66 @@ def main():
                         st.success(f"Tractomula {t.placa} eliminada")
                         st.rerun()
 
+    # ==================== TAB 2: RUTAS ====================
     with tab2:
         st.header("Tus Rutas")
+        st.caption("💡 Los valores por defecto se autocompletan en cada viaje nuevo con esta ruta (puedes editarlos si cambian).")
         with st.form(key="form_ruta"):
             col1, col2 = st.columns(2)
             with col1:
                 origen = st.text_input("Origen")
                 destino = st.text_input("Destino")
                 distancia_km = st.number_input("Distancia (km)", min_value=0.0)
-            with col2:
-                es_frontera = st.checkbox("¿Es ruta a frontera?", help="Activa si el destino es hacia frontera")
-                es_regional = st.checkbox("¿Es regional?", help="Comisión conductor: $180,000")
-                es_aguachica = st.checkbox("¿Es para Aguachica?", help="Comisión conductor: $350,000")
                 ida_vuelta = st.checkbox("Ida y vuelta")
+            with col2:
+                es_frontera = st.checkbox("¿Es ruta a frontera?", help="Comisión conductor: $565.000")
+                es_regional = st.checkbox("¿Es regional?", help="Comisión conductor: $200.000")
+                es_aguachica = st.checkbox("¿Es para Aguachica?", help="Comisión conductor: $360.000")
+                es_riohacha = st.checkbox("¿Es para Riohacha?", help="Comisión conductor: $350.000")
+
+            st.divider()
+            st.markdown("**Valores por defecto de gastos variables (opcional, se autocompletan en cada viaje)**")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                default_flypass = st.number_input("Flypass default (COP)", min_value=0.0, step=1000.0)
+                default_peajes = st.number_input("Peajes default (COP)", min_value=0.0, step=1000.0)
+                default_urea_acpm = st.number_input("Urea y/o ACPM default (COP)", min_value=0.0, step=1000.0)
+            with col2:
+                default_hotel = st.number_input("Hotel default (COP)", min_value=0.0, step=1000.0)
+                default_comida = st.number_input("Comida default (COP)", min_value=0.0, step=1000.0)
+                default_transporte = st.number_input("Transporte default (COP)", min_value=0.0, step=1000.0)
+            with col3:
+                default_propina_comision = st.number_input("Propina/Comisión default (COP)", min_value=0.0, step=1000.0)
+                default_cargue_descargue = st.number_input("Cargue/Descargue-Amarre default (COP)", min_value=0.0, step=1000.0)
+                default_otros = st.number_input("Otros default (COP)", min_value=0.0, step=1000.0)
 
             submit = st.form_submit_button("Agregar Ruta")
             if submit and origen and destino:
                 if ida_vuelta:
                     distancia_km *= 2
                     destino = f"{destino} (ida y vuelta)"
-                ruta = Ruta(origen, destino, distancia_km, es_frontera, es_regional, es_aguachica)
+                ruta = Ruta(
+                    origen=origen, destino=destino, distancia_km=distancia_km,
+                    es_frontera=es_frontera, es_regional=es_regional,
+                    es_aguachica=es_aguachica, es_riohacha=es_riohacha,
+                    default_flypass=default_flypass, default_peajes=default_peajes,
+                    default_urea_acpm=default_urea_acpm, default_hotel=default_hotel,
+                    default_comida=default_comida, default_transporte=default_transporte,
+                    default_propina_comision=default_propina_comision,
+                    default_cargue_descargue=default_cargue_descargue, default_otros=default_otros
+                )
                 ruta_id = db.guardar_ruta(ruta)
                 st.session_state.rutas = db.obtener_rutas()
-                st.success(f"✅ Ruta {origen} → {destino} guardada!")
+                st.success(f"✅ Ruta {origen} → {destino} guardada! (ID: {ruta_id})")
                 st.rerun()
 
         if st.session_state.rutas:
             st.subheader("Rutas Registradas")
             conn = st.session_state.db.get_connection()
             cursor = conn.cursor()
-            
-            # CORRECCIÓN: Pedimos las columnas por nombre igual que en la función de arriba
             cursor.execute("""
-                SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica 
-                FROM rutas 
+                SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica, es_riohacha
+                FROM rutas
                 ORDER BY origen, destino
             """)
             rutas_con_id = cursor.fetchall()
@@ -1500,23 +1552,24 @@ def main():
                 origen = ruta_data[1]
                 destino = ruta_data[2]
                 dist = ruta_data[3]
-                
-                # Leemos los datos en el orden exacto que pedimos en el SELECT
                 es_front = bool(ruta_data[4])
-                es_reg = bool(ruta_data[5]) 
+                es_reg = bool(ruta_data[5])
                 es_agua = bool(ruta_data[6])
+                es_rioh = bool(ruta_data[7])
 
                 col1, col2 = st.columns([4, 1])
                 with col1:
                     tags = []
                     if es_front:
-                        tags.append("🌐 FRONTERA ($500k)")
+                        tags.append("🌐 FRONTERA ($565k)")
                     if es_reg:
-                        tags.append("📍 REGIONAL ($180k)")
+                        tags.append("📍 REGIONAL ($200k)")
                     if es_agua:
-                        tags.append("🏙️ AGUACHICA ($350k)")
-                    
-                    tags_str = " ".join(tags) if tags else "🚛 NORMAL ($100k)"
+                        tags.append("🏙️ AGUACHICA ($360k)")
+                    if es_rioh:
+                        tags.append("🏖️ RIOHACHA ($350k)")
+
+                    tags_str = " ".join(tags) if tags else "🚛 URBANO ($120k x día)"
                     st.write(f"**{origen}** → **{destino}** ({formatear_numero(dist)} km) {tags_str}")
                 with col2:
                     if st.button("🗑️", key=f"eliminar_ruta_{ruta_id}"):
@@ -1525,6 +1578,7 @@ def main():
                         st.success("Ruta eliminada")
                         st.rerun()
 
+    # ==================== TAB 3: CONDUCTORES ====================
     with tab3:
         st.header("Tus Conductores")
 
@@ -1589,31 +1643,32 @@ def main():
                         st.success(f"Conductor {c.nombre} eliminado")
                         st.rerun()
 
+    # ==================== TAB 4: CÁLCULO DE VIAJE ====================
     with tab4:
         st.header("Realizar Cálculo de Viaje")
         if not (st.session_state.tractomulas and st.session_state.conductores and st.session_state.rutas):
             st.warning("⚠️ Primero agrega al menos una tractomula, un conductor y una ruta.")
         else:
+            st.subheader("📋 Selección Básica")
+            col1, col2 = st.columns(2)
+            with col1:
+                tractomula_selec = st.selectbox("Selecciona Tractomula", [t.placa for t in st.session_state.tractomulas], key="sel_tractomula")
+                tractomula_obj = next(t for t in st.session_state.tractomulas if t.placa == tractomula_selec)
+
+                conductores = [c.nombre for c in st.session_state.conductores]
+                conductor_asignado = PLACA_CONDUCTOR.get(tractomula_selec)
+                conductor_index = conductores.index(conductor_asignado) if conductor_asignado in conductores else 0
+                conductor_selec = st.selectbox("Selecciona Conductor", conductores, index=conductor_index, key="sel_conductor")
+                conductor_obj = next(c for c in st.session_state.conductores if c.nombre == conductor_selec)
+
+            with col2:
+                ruta_selec = st.selectbox("Selecciona Ruta", [f"{r.origen} → {r.destino}" for r in st.session_state.rutas], key="sel_ruta")
+                ruta_obj = next(r for r in st.session_state.rutas if f"{r.origen} → {r.destino}" == ruta_selec)
+                dias_viaje = st.number_input("Días del viaje", min_value=1, value=1, step=1, key="sel_dias")
+
+            st.caption("💡 Los campos de gastos variables abajo ya vienen precargados con los valores por defecto de esta ruta. Puedes editarlos si el viaje tuvo un valor distinto.")
+
             with st.form(key="form_calculo"):
-                st.subheader("📋 Datos del Viaje")
-
-                col1, col2 = st.columns(2)
-                with col1:
-                    tractomula_selec = st.selectbox("Selecciona Tractomula", [t.placa for t in st.session_state.tractomulas])
-                    tractomula_obj = next(t for t in st.session_state.tractomulas if t.placa == tractomula_selec)
-
-                    conductores = [c.nombre for c in st.session_state.conductores]
-                    conductor_asignado = PLACA_CONDUCTOR.get(tractomula_selec)
-                    conductor_index = conductores.index(conductor_asignado) if conductor_asignado in conductores else 0
-                    conductor_selec = st.selectbox("Selecciona Conductor", conductores, index=conductor_index)
-                    conductor_obj = next(c for c in st.session_state.conductores if c.nombre == conductor_selec)
-
-                with col2:
-                    ruta_selec = st.selectbox("Selecciona Ruta", [f"{r.origen} → {r.destino}" for r in st.session_state.rutas])
-                    ruta_obj = next(r for r in st.session_state.rutas if f"{r.origen} → {r.destino}" == ruta_selec)
-
-                    dias_viaje = st.number_input("Días del viaje", min_value=1, value=1, step=1)
-
                 st.divider()
                 st.subheader("📊 Parámetros del Viaje")
 
@@ -1626,39 +1681,57 @@ def main():
                                                        help="Activa ANTICIPO EMPRESA = VALOR FLETE × 0.90")
 
                 with col2:
-                    flypass_texto = st.text_input("Flypass (COP)", value="", placeholder="0")
+                    flypass_texto = st.text_input("Flypass (COP)", value=formatear_numero(ruta_obj.default_flypass) if ruta_obj.default_flypass > 0 else "", placeholder="0")
                     flypass = limpiar_numero(flypass_texto)
                     if flypass > 0:
                         st.caption(f"💵 {formatear_numero(flypass)}")
 
-                    peajes_texto = st.text_input("Peajes (COP)", value="", placeholder="0")
+                    peajes_texto = st.text_input("Peajes (COP)", value=formatear_numero(ruta_obj.default_peajes) if ruta_obj.default_peajes > 0 else "", placeholder="0")
                     peajes = limpiar_numero(peajes_texto)
                     if peajes > 0:
                         st.caption(f"💵 {formatear_numero(peajes)}")
 
+                    urea_acpm_texto = st.text_input("Urea y/o ACPM (COP)", value=formatear_numero(ruta_obj.default_urea_acpm) if ruta_obj.default_urea_acpm > 0 else "", placeholder="0")
+                    urea_acpm = limpiar_numero(urea_acpm_texto)
+                    if urea_acpm > 0:
+                        st.caption(f"💵 {formatear_numero(urea_acpm)}")
+
                 with col3:
-                    hotel_texto = st.text_input("Hotel (COP)", value="", placeholder="0")
+                    hotel_texto = st.text_input("Hotel (COP)", value=formatear_numero(ruta_obj.default_hotel) if ruta_obj.default_hotel > 0 else "", placeholder="0")
                     hotel = limpiar_numero(hotel_texto)
                     if hotel > 0:
                         st.caption(f"💵 {formatear_numero(hotel)}")
 
-                    comida_texto = st.text_input("Comida (COP)", value="", placeholder="0")
+                    comida_texto = st.text_input("Comida (COP)", value=formatear_numero(ruta_obj.default_comida) if ruta_obj.default_comida > 0 else "", placeholder="0")
                     comida = limpiar_numero(comida_texto)
                     if comida > 0:
                         st.caption(f"💵 {formatear_numero(comida)}")
 
+                    transporte_texto = st.text_input("Transporte (COP)", value=formatear_numero(ruta_obj.default_transporte) if ruta_obj.default_transporte > 0 else "", placeholder="0")
+                    transporte = limpiar_numero(transporte_texto)
+                    if transporte > 0:
+                        st.caption(f"💵 {formatear_numero(transporte)}")
+
                 col1, col2, col3 = st.columns(3)
                 with col1:
-                    cargue_texto = st.text_input("Cargue/Descargue (COP)", value="", placeholder="0")
+                    propina_texto = st.text_input("Propina/Comisión (COP)", value=formatear_numero(ruta_obj.default_propina_comision) if ruta_obj.default_propina_comision > 0 else "", placeholder="0")
+                    propina_comision = limpiar_numero(propina_texto)
+                    if propina_comision > 0:
+                        st.caption(f"💵 {formatear_numero(propina_comision)}")
+                with col2:
+                    cargue_texto = st.text_input("Cargue/Descargue - Amarre/Desamarre (COP)", value=formatear_numero(ruta_obj.default_cargue_descargue) if ruta_obj.default_cargue_descargue > 0 else "", placeholder="0")
                     cargue_descargue = limpiar_numero(cargue_texto)
                     if cargue_descargue > 0:
                         st.caption(f"💵 {formatear_numero(cargue_descargue)}")
-                with col2:
-                    otros_texto = st.text_input("Otros - Engrase, Lavada, Policía (COP)", value="", placeholder="0")
+                with col3:
+                    otros_texto = st.text_input("Otros - Engrase, Lavada, Policía (COP)", value=formatear_numero(ruta_obj.default_otros) if ruta_obj.default_otros > 0 else "", placeholder="0")
                     otros = limpiar_numero(otros_texto)
                     if otros > 0:
                         st.caption(f"💵 {formatear_numero(otros)}")
-                with col3:
+
+                st.divider()
+                col1, col2 = st.columns(2)
+                with col1:
                     anticipo_texto = st.text_input("Anticipo (COP)", value="", placeholder="0",
                                                   help="Anticipo entregado al conductor")
                     anticipo = limpiar_numero(anticipo_texto)
@@ -1679,12 +1752,12 @@ def main():
                 if valor_flete > 0:
                     st.success(f"✅ Flete: ${formatear_numero(valor_flete)} COP")
 
-                # Preview de cálculo
                 if valor_flete > 0:
                     calc_preview = CalculadoraCostos(
                         tractomula_obj, conductor_obj, ruta_obj,
                         dias_viaje, es_frontera, hubo_parqueo,
-                        flypass, peajes, hotel, comida, cargue_descargue, otros,
+                        flypass, peajes, urea_acpm, hotel, comida, transporte,
+                        propina_comision, cargue_descargue, otros,
                         valor_flete, anticipo, hubo_anticipo_empresa, datos
                     )
                     costos_preview = calc_preview.calcular_costos_totales()
@@ -1699,9 +1772,9 @@ def main():
                         st.metric("Saldo", f"${formatear_numero(costos_preview['saldo'])}",
                                   help="ANTICIPO - LEGALIZACIÓN")
                     with col4:
-                        st.metric("Punto Equilibrio", f"${formatear_numero(costos_preview['punto_equilibrio'])}")
+                        st.metric("Punto Equilibrio (40% Flete)", f"${formatear_numero(costos_preview['punto_equilibrio'])}")
 
-                    observaciones = st.text_area("Observaciones (opcional)", placeholder="Notas sobre este viaje...")
+                observaciones = st.text_area("Observaciones (opcional)", placeholder="Notas sobre este viaje...")
 
                 col_btn1, col_btn2 = st.columns(2)
                 with col_btn1:
@@ -1716,7 +1789,8 @@ def main():
                         calculadora = CalculadoraCostos(
                             tractomula_obj, conductor_obj, ruta_obj,
                             dias_viaje, es_frontera, hubo_parqueo,
-                            flypass, peajes, hotel, comida, cargue_descargue, otros,
+                            flypass, peajes, urea_acpm, hotel, comida, transporte,
+                            propina_comision, cargue_descargue, otros,
                             valor_flete, anticipo, hubo_anticipo_empresa, datos
                         )
                         st.session_state.calculadoras.append(calculadora)
@@ -1734,7 +1808,7 @@ def main():
                                     - Valor Flete: ${formatear_numero(calculadora.valor_flete)}
                                     - **Utilidad: ${formatear_numero(utilidad)}**
                                     - **Rentabilidad: {costos['rentabilidad']:.1f}%**
-                                    - **Saldo: ${formatear_numero(costos['saldo'])}**")
+                                    - **Saldo: ${formatear_numero(costos['saldo'])}**
                                     """)
                                 else:
                                     st.error(f"""
@@ -1752,6 +1826,7 @@ def main():
                         else:
                             st.success("✅ Cálculo completado! Ve a la pestaña de Reportes.")
 
+    # ==================== TAB 5: REPORTES ====================
     with tab5:
         st.header("📄 Reportes y Descargas")
         if st.session_state.calculadoras:
@@ -1780,6 +1855,7 @@ def main():
         else:
             st.info("Realiza al menos un cálculo en la pestaña anterior para ver reportes.")
 
+    # ==================== TAB 6: TRAZABILIDAD ====================
     with tab6:
         st.header("📂 Trazabilidad de Viajes")
         st.markdown("Historial completo de todos los viajes guardados en el sistema.")
@@ -1895,6 +1971,7 @@ def main():
                     st.markdown("### 📊 Desglose de Costos")
                     col1, col2, col3 = st.columns(3)
 
+                    # Nota: viaje[40], [41], [42] = urea_acpm, transporte, propina_comision (columnas nuevas al final)
                     with col1:
                         st.write(f"1. Nómina Admin: ${formatear_numero(viaje[10])}")
                         st.write(f"2. Nómina Conductor: ${formatear_numero(viaje[11])}")
@@ -1903,32 +1980,27 @@ def main():
                         st.write(f"5. Seguros: ${formatear_numero(viaje[14])}")
                         st.write(f"6. Tecnomecánica: ${formatear_numero(viaje[15])}")
                         st.write(f"7. Llantas: ${formatear_numero(viaje[16])}")
-                        st.write(f"8. Aceite: ${formatear_numero(viaje[17])}")
-                        st.write(f"9. Combustible: ${formatear_numero(viaje[18])}")
-                        st.write(f"10. Flypass: ${formatear_numero(viaje[20])}")
-                        st.write(f"11. Peajes: ${formatear_numero(viaje[21])}")
-                        st.write(f"12. Cruce Frontera: ${formatear_numero(viaje[22])}")
-                        st.write(f"13. Hotel: ${formatear_numero(viaje[23])}")
-                        st.write(f"14. Comida: ${formatear_numero(viaje[24])}")
-                        st.write(f"15. Parqueo: ${formatear_numero(viaje[25])}")
-                        st.write(f"16. Cargue/Descargue: ${formatear_numero(viaje[26])}")
-                        st.write(f"17. Otros: ${formatear_numero(viaje[27])}")
 
                     with col2:
-                        st.write(f"7. Llantas: ${formatear_numero(viaje[16])}")
                         st.write(f"8. Aceite: ${formatear_numero(viaje[17])}")
                         st.write(f"9. Combustible: ${formatear_numero(viaje[18])}")
                         st.write(f" - Galones: {formatear_decimal(viaje[19])}")
                         st.write(f"10. Flypass: ${formatear_numero(viaje[20])}")
                         st.write(f"11. Peajes: ${formatear_numero(viaje[21])}")
-
-                    with col3:
                         st.write(f"12. Cruce Frontera: ${formatear_numero(viaje[22])}")
                         st.write(f"13. Hotel: ${formatear_numero(viaje[23])}")
+
+                    with col3:
                         st.write(f"14. Comida: ${formatear_numero(viaje[24])}")
                         st.write(f"15. Parqueo: ${formatear_numero(viaje[25])}")
                         st.write(f"16. Cargue/Descargue: ${formatear_numero(viaje[26])}")
                         st.write(f"17. Otros: ${formatear_numero(viaje[27])}")
+                        try:
+                            st.write(f"18. Urea/ACPM: ${formatear_numero(viaje[40])}")
+                            st.write(f"19. Transporte: ${formatear_numero(viaje[41])}")
+                            st.write(f"20. Propina/Comisión: ${formatear_numero(viaje[42])}")
+                        except IndexError:
+                            pass
 
                     if viaje[39]:
                         st.markdown("### 📝 Observaciones")
@@ -1986,6 +2058,7 @@ def main():
             rutas_df = pd.DataFrame(stats['rutas_frecuentes'], columns=['Origen', 'Destino', 'Cantidad'])
             st.dataframe(rutas_df, use_container_width=True, hide_index=True)
 
+    # ==================== TAB 7: ACUMULADO POR FLOTA ====================
     with tab7:
         st.header("Acumulado por Flota")
         st.markdown("Acumulados totales por unidad (tractomula/placa)")
@@ -1998,8 +2071,12 @@ def main():
                 mes_seleccionado = st.selectbox("Mes", range(1, 13))
                 año_seleccionado = st.selectbox("Año", range(2020, datetime.now().year + 1))
                 fecha_inicio = f"{año_seleccionado}-{mes_seleccionado:02d}-01"
-                ultimo_dia = (datetime(año_seleccionado, mes_seleccionado + 1, 1) - timedelta(days=1)).day
-                fecha_fin = f"{año_seleccionado}-{mes_seleccionado:02d}-{ultimo_dia}"
+                # --- CORREGIDO: bug de diciembre (antes intentaba crear datetime(año, 13, 1)) ---
+                if mes_seleccionado == 12:
+                    fecha_fin = f"{año_seleccionado}-12-31"
+                else:
+                    ultimo_dia = (datetime(año_seleccionado, mes_seleccionado + 1, 1) - timedelta(days=1)).day
+                    fecha_fin = f"{año_seleccionado}-{mes_seleccionado:02d}-{ultimo_dia}"
             elif filtro_tipo == "Año":
                 año_seleccionado = st.selectbox("Año", range(2020, datetime.now().year + 1))
                 fecha_inicio = f"{año_seleccionado}-01-01"
@@ -2052,10 +2129,6 @@ def main():
             fig_rentabilidad = px.bar(df_totales, x='placa', y='total_rentabilidad', title="Rentabilidad por Unidad")
             st.plotly_chart(fig_rentabilidad)
 
+
 if __name__ == "__main__":
     main()
-
-
-
-
-
