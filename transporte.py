@@ -151,6 +151,14 @@ class DatabaseManager:
             cursor.execute("ALTER TABLE viajes_v4 ADD COLUMN IF NOT EXISTS transporte REAL DEFAULT 0")
             cursor.execute("ALTER TABLE viajes_v4 ADD COLUMN IF NOT EXISTS propina_comision REAL DEFAULT 0")
 
+            # --- MIGRACIÓN: fecha real del viaje (distinta de fecha_creacion, que es cuándo se registró) ---
+            cursor.execute("ALTER TABLE viajes_v4 ADD COLUMN IF NOT EXISTS fecha_viaje DATE")
+            # Para viajes ya guardados sin fecha_viaje, se rellena con la fecha de creación como aproximación
+            cursor.execute("""
+                UPDATE viajes_v4 SET fecha_viaje = to_date(fecha_creacion, 'YYYY-MM-DD')
+                WHERE fecha_viaje IS NULL
+            """)
+
             # Tabla de tractomulas
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS tractomulas (
@@ -200,8 +208,10 @@ class DatabaseManager:
         except Exception as e:
             st.error(f"Error inicializando base de datos: {e}")
 
-    def guardar_viaje(self, calculadora, observaciones=""):
-        """Guarda un viaje en la base de datos de forma segura con HORA COLOMBIA"""
+    def guardar_viaje(self, calculadora, fecha_viaje, observaciones=""):
+        """Guarda un viaje en la base de datos de forma segura con HORA COLOMBIA.
+        fecha_viaje: fecha real en la que ocurrió el viaje (objeto date), distinta de
+        fecha_creacion que es cuándo se registró en el sistema."""
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -209,6 +219,7 @@ class DatabaseManager:
 
             hora_colombia = datetime.now() - timedelta(hours=5)
             fecha_actual = hora_colombia.strftime('%Y-%m-%d %H:%M:%S')
+            fecha_viaje_str = fecha_viaje.strftime('%Y-%m-%d') if fecha_viaje else fecha_actual[:10]
 
             datos_viaje = (
                 fecha_actual,
@@ -253,6 +264,7 @@ class DatabaseManager:
                 float(calculadora.urea_acpm),
                 float(calculadora.transporte),
                 float(calculadora.propina_comision),
+                fecha_viaje_str,
             )
 
             sql_insert = '''
@@ -265,13 +277,13 @@ class DatabaseManager:
                     total_gastos, legalizacion, punto_equilibrio, valor_flete,
                     utilidad, rentabilidad, anticipo, saldo, hubo_anticipo_empresa,
                     ant_empresa, saldo_empresa, observaciones,
-                    urea_acpm, transporte, propina_comision
+                    urea_acpm, transporte, propina_comision, fecha_viaje
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s
+                    %s, %s, %s, %s
                 ) RETURNING id
             '''
 
@@ -300,14 +312,16 @@ class DatabaseManager:
         return df
 
     def buscar_viajes(self, fecha_inicio=None, fecha_fin=None, placa=None, conductor=None, origen=None, destino=None):
+        """Filtra por fecha_viaje (fecha real en que ocurrió el viaje), no por fecha_creacion
+        (que es cuándo se registró en el sistema)."""
         conn = self.get_connection()
         query = "SELECT * FROM viajes_v4 WHERE 1=1"
         params = []
         if fecha_inicio:
-            query += " AND to_date(fecha_creacion, 'YYYY-MM-DD') >= %s"
+            query += " AND fecha_viaje >= %s"
             params.append(fecha_inicio)
         if fecha_fin:
-            query += " AND to_date(fecha_creacion, 'YYYY-MM-DD') <= %s"
+            query += " AND fecha_viaje <= %s"
             params.append(fecha_fin)
         if placa:
             query += " AND placa = %s"
