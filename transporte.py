@@ -203,6 +203,43 @@ class DatabaseManager:
             cursor.execute("ALTER TABLE rutas ADD COLUMN IF NOT EXISTS default_cargue_descargue REAL DEFAULT 0")
             cursor.execute("ALTER TABLE rutas ADD COLUMN IF NOT EXISTS default_otros REAL DEFAULT 0")
 
+            # --- NUEVA TABLA: Liquidaciones de conductores (quincenas) ---
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS liquidaciones_conductor (
+                    id SERIAL PRIMARY KEY,
+                    conductor TEXT NOT NULL,
+                    periodo_inicio DATE NOT NULL,
+                    periodo_fin DATE NOT NULL,
+                    viajes_incluidos TEXT,
+                    cantidad_viajes INTEGER DEFAULT 0,
+                    total_nomina REAL DEFAULT 0,
+                    total_comisiones REAL DEFAULT 0,
+                    total_anticipos REAL DEFAULT 0,
+                    total_a_pagar REAL DEFAULT 0,
+                    estado TEXT DEFAULT 'Pendiente',
+                    fecha_pago DATE,
+                    observaciones TEXT,
+                    fecha_creacion TEXT
+                )
+            ''')
+
+            # --- NUEVA TABLA: Cuentas por pagar/cobrar con vencimientos ---
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS cuentas_por_pagar_cobrar (
+                    id SERIAL PRIMARY KEY,
+                    tipo TEXT NOT NULL,
+                    concepto TEXT NOT NULL,
+                    tercero TEXT,
+                    monto REAL NOT NULL,
+                    fecha_vencimiento DATE NOT NULL,
+                    estado TEXT DEFAULT 'Pendiente',
+                    fecha_pago DATE,
+                    viaje_id INTEGER,
+                    observaciones TEXT,
+                    fecha_creacion TEXT
+                )
+            ''')
+
             conn.commit()
             conn.close()
         except Exception as e:
@@ -390,7 +427,7 @@ class DatabaseManager:
                        SUM(total_gastos) as total_gastos, SUM(valor_flete) as total_ingresos,
                        SUM(utilidad) as total_utilidad, AVG(utilidad) as utilidad_promedio
                 FROM viajes_v4
-                WHERE to_date(fecha_creacion, 'YYYY-MM-DD') >= %s
+                WHERE fecha_viaje >= %s
             """, (inicio_mes,))
             row = cursor.fetchone()
             data['mes_actual'] = {
@@ -406,7 +443,7 @@ class DatabaseManager:
                 SELECT placa, COUNT(*) as viajes, SUM(total_gastos) as gastos,
                        SUM(valor_flete) as ingresos, SUM(utilidad) as utilidad
                 FROM viajes_v4
-                WHERE to_date(fecha_creacion, 'YYYY-MM-DD') >= %s
+                WHERE fecha_viaje >= %s
                 GROUP BY placa ORDER BY utilidad DESC
             """, (inicio_mes,))
             data['por_tractomula'] = cursor.fetchall()
@@ -415,7 +452,7 @@ class DatabaseManager:
                 SELECT conductor, COUNT(*) as viajes, SUM(utilidad) as utilidad,
                        AVG(utilidad) as utilidad_promedio
                 FROM viajes_v4
-                WHERE to_date(fecha_creacion, 'YYYY-MM-DD') >= %s
+                WHERE fecha_viaje >= %s
                 GROUP BY conductor ORDER BY utilidad DESC
             """, (inicio_mes,))
             data['por_conductor'] = cursor.fetchall()
@@ -424,17 +461,17 @@ class DatabaseManager:
                 SELECT origen, destino, COUNT(*) as viajes, AVG(utilidad) as utilidad_promedio,
                        SUM(utilidad) as utilidad_total
                 FROM viajes_v4
-                WHERE to_date(fecha_creacion, 'YYYY-MM-DD') >= %s
+                WHERE fecha_viaje >= %s
                 GROUP BY origen, destino ORDER BY utilidad_total DESC LIMIT 5
             """, (inicio_mes,))
             data['rutas_rentables'] = cursor.fetchall()
 
             cursor.execute("""
-                SELECT to_char(to_date(fecha_creacion, 'YYYY-MM-DD'), 'YYYY-MM') as mes,
+                SELECT to_char(fecha_viaje, 'YYYY-MM') as mes,
                        COUNT(*) as viajes, SUM(total_gastos) as gastos,
                        SUM(valor_flete) as ingresos, SUM(utilidad) as utilidad
                 FROM viajes_v4
-                WHERE to_date(fecha_creacion, 'YYYY-MM-DD') >= CURRENT_DATE - INTERVAL '6 months'
+                WHERE fecha_viaje >= CURRENT_DATE - INTERVAL '6 months'
                 GROUP BY mes ORDER BY mes
             """)
             data['evolucion_6_meses'] = cursor.fetchall()
@@ -447,7 +484,7 @@ class DatabaseManager:
 
             cursor.execute("""
                 SELECT SUM(valor_flete) as ut_bruta, SUM(utilidad) as ut_neta
-                FROM viajes_v4 WHERE to_date(fecha_creacion, 'YYYY-MM-DD') >= %s
+                FROM viajes_v4 WHERE fecha_viaje >= %s
             """, (inicio_mes,))
             row_ut = cursor.fetchone()
             ut_bruta = row_ut[0] or 0
@@ -491,10 +528,10 @@ class DatabaseManager:
         """
         params = []
         if fecha_inicio:
-            query += " AND to_date(fecha_creacion, 'YYYY-MM-DD') >= %s"
+            query += " AND fecha_viaje >= %s"
             params.append(fecha_inicio)
         if fecha_fin:
-            query += " AND to_date(fecha_creacion, 'YYYY-MM-DD') <= %s"
+            query += " AND fecha_viaje <= %s"
             params.append(fecha_fin)
         query += " GROUP BY placa ORDER BY placa"
 
@@ -676,6 +713,132 @@ class DatabaseManager:
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("DELETE FROM rutas WHERE id = %s", (ruta_id,))
+        conn.commit()
+        conn.close()
+
+    # ---------------- Métodos para Liquidaciones de Conductores ----------------
+    def obtener_viajes_para_liquidar(self, conductor, periodo_inicio, periodo_fin):
+        """Trae los viajes de un conductor en un rango de fechas (por fecha_viaje real)"""
+        conn = self.get_connection()
+        query = """
+            SELECT id, fecha_viaje, origen, destino, nomina_conductor, comision_conductor, anticipo
+            FROM viajes_v4
+            WHERE conductor = %s AND fecha_viaje >= %s AND fecha_viaje <= %s
+            ORDER BY fecha_viaje
+        """
+        df = pd.read_sql_query(query, conn, params=[conductor, periodo_inicio, periodo_fin])
+        conn.close()
+        return df
+
+    def guardar_liquidacion(self, conductor, periodo_inicio, periodo_fin, df_viajes, observaciones=""):
+        """Calcula y guarda la liquidación de un conductor para un periodo (ej. quincena).
+        Total a Pagar = Total Nómina + Total Comisiones - Total Anticipos"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+
+        total_nomina = float(df_viajes['nomina_conductor'].sum()) if not df_viajes.empty else 0.0
+        total_comisiones = float(df_viajes['comision_conductor'].sum()) if not df_viajes.empty else 0.0
+        total_anticipos = float(df_viajes['anticipo'].sum()) if not df_viajes.empty else 0.0
+        total_a_pagar = total_nomina + total_comisiones - total_anticipos
+        viajes_incluidos = ",".join(str(i) for i in df_viajes['id'].tolist()) if not df_viajes.empty else ""
+        cantidad_viajes = len(df_viajes)
+
+        hora_colombia = datetime.now() - timedelta(hours=5)
+        fecha_creacion = hora_colombia.strftime('%Y-%m-%d %H:%M:%S')
+
+        cursor.execute('''
+            INSERT INTO liquidaciones_conductor (
+                conductor, periodo_inicio, periodo_fin, viajes_incluidos, cantidad_viajes,
+                total_nomina, total_comisiones, total_anticipos, total_a_pagar,
+                estado, observaciones, fecha_creacion
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'Pendiente', %s, %s)
+            RETURNING id
+        ''', (conductor, periodo_inicio, periodo_fin, viajes_incluidos, cantidad_viajes,
+              total_nomina, total_comisiones, total_anticipos, total_a_pagar,
+              observaciones, fecha_creacion))
+        result = cursor.fetchone()
+        liquidacion_id = result[0] if result else None
+        conn.commit()
+        conn.close()
+        return liquidacion_id, total_nomina, total_comisiones, total_anticipos, total_a_pagar
+
+    def obtener_liquidaciones(self, conductor=None, estado=None):
+        conn = self.get_connection()
+        query = "SELECT * FROM liquidaciones_conductor WHERE 1=1"
+        params = []
+        if conductor:
+            query += " AND conductor = %s"
+            params.append(conductor)
+        if estado:
+            query += " AND estado = %s"
+            params.append(estado)
+        query += " ORDER BY periodo_inicio DESC"
+        df = pd.read_sql_query(query, conn, params=params)
+        conn.close()
+        return df
+
+    def marcar_liquidacion_pagada(self, liquidacion_id):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        hoy = (datetime.now() - timedelta(hours=5)).strftime('%Y-%m-%d')
+        cursor.execute("UPDATE liquidaciones_conductor SET estado = 'Pagada', fecha_pago = %s WHERE id = %s",
+                       (hoy, liquidacion_id))
+        conn.commit()
+        conn.close()
+
+    def eliminar_liquidacion(self, liquidacion_id):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM liquidaciones_conductor WHERE id = %s", (liquidacion_id,))
+        conn.commit()
+        conn.close()
+
+    # ---------------- Métodos para Cuentas por Pagar/Cobrar ----------------
+    def guardar_cuenta(self, tipo, concepto, tercero, monto, fecha_vencimiento, observaciones="", viaje_id=None):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        hora_colombia = datetime.now() - timedelta(hours=5)
+        fecha_creacion = hora_colombia.strftime('%Y-%m-%d %H:%M:%S')
+        cursor.execute('''
+            INSERT INTO cuentas_por_pagar_cobrar (
+                tipo, concepto, tercero, monto, fecha_vencimiento, estado, observaciones, viaje_id, fecha_creacion
+            ) VALUES (%s, %s, %s, %s, %s, 'Pendiente', %s, %s, %s)
+            RETURNING id
+        ''', (tipo, concepto, tercero, monto, fecha_vencimiento, observaciones, viaje_id, fecha_creacion))
+        result = cursor.fetchone()
+        cuenta_id = result[0] if result else None
+        conn.commit()
+        conn.close()
+        return cuenta_id
+
+    def obtener_cuentas(self, tipo=None, estado=None):
+        conn = self.get_connection()
+        query = "SELECT * FROM cuentas_por_pagar_cobrar WHERE 1=1"
+        params = []
+        if tipo:
+            query += " AND tipo = %s"
+            params.append(tipo)
+        if estado:
+            query += " AND estado = %s"
+            params.append(estado)
+        query += " ORDER BY fecha_vencimiento ASC"
+        df = pd.read_sql_query(query, conn, params=params)
+        conn.close()
+        return df
+
+    def marcar_cuenta_pagada(self, cuenta_id):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        hoy = (datetime.now() - timedelta(hours=5)).strftime('%Y-%m-%d')
+        cursor.execute("UPDATE cuentas_por_pagar_cobrar SET estado = 'Pagado', fecha_pago = %s WHERE id = %s",
+                       (hoy, cuenta_id))
+        conn.commit()
+        conn.close()
+
+    def eliminar_cuenta(self, cuenta_id):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM cuentas_por_pagar_cobrar WHERE id = %s", (cuenta_id,))
         conn.commit()
         conn.close()
 
@@ -1311,7 +1474,7 @@ def main():
 - Punto de equilibrio: Valor Flete x {int(datos.PUNTO_EQUILIBRIO_PORCENTAJE*100)}%
         """)
 
-    tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
         "📊 Dashboard",
         "1. Tractomulas",
         "2. Rutas",
@@ -1319,7 +1482,9 @@ def main():
         "4. Cálculo de Viaje",
         "5. Reportes",
         "6. 📂 Trazabilidad",
-        "7. Acumulado por Flota"
+        "7. Acumulado por Flota",
+        "8. 💵 Liquidaciones",
+        "9. ⏰ Cuentas Pendientes"
     ])
 
     # ==================== TAB 0: DASHBOARD ====================
@@ -1712,6 +1877,12 @@ def main():
                 ruta_selec = st.selectbox("Selecciona Ruta", [f"{r.origen} → {r.destino}" for r in st.session_state.rutas], key="sel_ruta")
                 ruta_obj = next(r for r in st.session_state.rutas if f"{r.origen} → {r.destino}" == ruta_selec)
                 dias_viaje = st.number_input("Días del viaje", min_value=1, value=1, step=1, key="sel_dias")
+                fecha_viaje = st.date_input(
+                    "📅 Fecha del viaje",
+                    value=datetime.now().date(),
+                    help="Fecha real en que ocurrió/ocurrirá el viaje (no la fecha en que lo registras). Se usa para todos los filtros de fecha del sistema.",
+                    key="sel_fecha_viaje"
+                )
 
             st.caption("💡 Los campos de gastos variables abajo ya vienen precargados con los valores por defecto de esta ruta. Puedes editarlos si el viaje tuvo un valor distinto.")
 
@@ -1843,7 +2014,7 @@ def main():
                         st.session_state.calculadoras.append(calculadora)
 
                         if guardar:
-                            viaje_id = db.guardar_viaje(calculadora, observaciones)
+                            viaje_id = db.guardar_viaje(calculadora, fecha_viaje, observaciones)
                             if viaje_id:
                                 costos = calculadora.calcular_costos_totales()
                                 utilidad = costos.get('utilidad', 0)
@@ -1851,6 +2022,7 @@ def main():
                                     st.success(f"""
                                     ✅ **Viaje guardado exitosamente (ID: {viaje_id})**
 
+                                    - Fecha del Viaje: {fecha_viaje.strftime('%Y-%m-%d')}
                                     - Total Gastos: ${formatear_numero(costos['total_gastos'])}
                                     - Valor Flete: ${formatear_numero(calculadora.valor_flete)}
                                     - **Utilidad: ${formatear_numero(utilidad)}**
@@ -1861,6 +2033,7 @@ def main():
                                     st.error(f"""
                                     ⚠️ **Viaje guardado (ID: {viaje_id}) - PÉRDIDA DETECTADA**
 
+                                    - Fecha del Viaje: {fecha_viaje.strftime('%Y-%m-%d')}
                                     - Total Gastos: ${formatear_numero(costos['total_gastos'])}
                                     - Valor Flete: ${formatear_numero(calculadora.valor_flete)}
                                     - **Pérdida: ${formatear_numero(utilidad)}**
@@ -1954,14 +2127,14 @@ def main():
             st.subheader("Resultados")
 
             columnas_mostrar = [
-                'id', 'fecha_creacion', 'placa', 'conductor', 'origen', 'destino',
+                'id', 'fecha_viaje', 'fecha_creacion', 'placa', 'conductor', 'origen', 'destino',
                 'distancia_km', 'dias_viaje', 'total_gastos', 'valor_flete',
                 'utilidad', 'rentabilidad'
             ]
 
             df_mostrar = df_viajes[columnas_mostrar].copy()
             df_mostrar.columns = [
-                'ID', 'Fecha', 'Placa', 'Conductor', 'Origen', 'Destino',
+                'ID', 'Fecha del Viaje', 'Fecha Registro', 'Placa', 'Conductor', 'Origen', 'Destino',
                 'Km', 'Días', 'Total Gastos', 'Valor Flete', 'Utilidad', 'Rentabilidad %'
             ]
 
@@ -1983,7 +2156,11 @@ def main():
                     with col1:
                         st.markdown("### 📋 Información del Viaje")
                         st.write(f"**ID:** {viaje[0]}")
-                        st.write(f"**Fecha:** {viaje[1]}")
+                        st.write(f"**Fecha de Registro:** {viaje[1]}")
+                        try:
+                            st.write(f"**📅 Fecha del Viaje:** {viaje[43]}")
+                        except IndexError:
+                            pass
                         st.write(f"**Placa:** {viaje[2]}")
                         st.write(f"**Conductor:** {viaje[3]}")
                         st.write(f"**Ruta:** {viaje[4]} → {viaje[5]}")
@@ -2175,6 +2352,245 @@ def main():
             st.plotly_chart(fig_ut)
             fig_rentabilidad = px.bar(df_totales, x='placa', y='total_rentabilidad', title="Rentabilidad por Unidad")
             st.plotly_chart(fig_rentabilidad)
+
+    # ==================== TAB 8: LIQUIDACIONES DE CONDUCTORES ====================
+    with tab8:
+        st.header("💵 Liquidaciones de Conductores")
+        st.caption("Calcula lo que hay que pagarle a cada conductor en un periodo (ej. quincena): Nómina + Comisiones − Anticipos ya entregados.")
+
+        st.subheader("📝 Generar Nueva Liquidación")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            conductores_nombres = [c.nombre for c in st.session_state.conductores] if st.session_state.conductores else []
+            if conductores_nombres:
+                conductor_liq = st.selectbox("Conductor", conductores_nombres, key="liq_conductor")
+            else:
+                conductor_liq = None
+                st.warning("Primero registra conductores en la pestaña 3.")
+        with col2:
+            periodo_inicio_liq = st.date_input("Periodo Desde", value=datetime.now().replace(day=1).date(), key="liq_inicio")
+        with col3:
+            periodo_fin_liq = st.date_input("Periodo Hasta", value=datetime.now().date(), key="liq_fin")
+
+        if conductor_liq and st.button("🔍 Buscar Viajes del Periodo", key="liq_buscar"):
+            df_viajes_liq = db.obtener_viajes_para_liquidar(conductor_liq, periodo_inicio_liq, periodo_fin_liq)
+            st.session_state.df_viajes_liq = df_viajes_liq
+            st.session_state.conductor_liq_actual = conductor_liq
+            st.session_state.periodo_liq_actual = (periodo_inicio_liq, periodo_fin_liq)
+
+        if 'df_viajes_liq' in st.session_state and not st.session_state.df_viajes_liq.empty:
+            df_viajes_liq = st.session_state.df_viajes_liq
+            st.success(f"Se encontraron {len(df_viajes_liq)} viajes de {st.session_state.conductor_liq_actual} en el periodo seleccionado.")
+
+            df_mostrar_liq = df_viajes_liq.copy()
+            df_mostrar_liq['nomina_conductor'] = df_mostrar_liq['nomina_conductor'].apply(lambda x: f"${formatear_numero(x)}")
+            df_mostrar_liq['comision_conductor'] = df_mostrar_liq['comision_conductor'].apply(lambda x: f"${formatear_numero(x)}")
+            df_mostrar_liq['anticipo'] = df_mostrar_liq['anticipo'].apply(lambda x: f"${formatear_numero(x)}")
+            df_mostrar_liq.columns = ['ID', 'Fecha Viaje', 'Origen', 'Destino', 'Nómina', 'Comisión', 'Anticipo']
+            st.dataframe(df_mostrar_liq, use_container_width=True, hide_index=True)
+
+            total_nomina_preview = float(df_viajes_liq['nomina_conductor'].sum())
+            total_comisiones_preview = float(df_viajes_liq['comision_conductor'].sum())
+            total_anticipos_preview = float(df_viajes_liq['anticipo'].sum())
+            total_a_pagar_preview = total_nomina_preview + total_comisiones_preview - total_anticipos_preview
+
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Nómina", f"${formatear_numero(total_nomina_preview)}")
+            with col2:
+                st.metric("Total Comisiones", f"${formatear_numero(total_comisiones_preview)}")
+            with col3:
+                st.metric("Total Anticipos", f"${formatear_numero(total_anticipos_preview)}")
+            with col4:
+                st.metric("💰 TOTAL A PAGAR", f"${formatear_numero(total_a_pagar_preview)}")
+
+            observaciones_liq = st.text_area("Observaciones de la liquidación (opcional)", key="liq_obs")
+
+            if st.button("💾 Guardar Liquidación", type="primary", key="liq_guardar"):
+                liquidacion_id, t_nom, t_com, t_ant, t_pagar = db.guardar_liquidacion(
+                    st.session_state.conductor_liq_actual,
+                    st.session_state.periodo_liq_actual[0],
+                    st.session_state.periodo_liq_actual[1],
+                    df_viajes_liq,
+                    observaciones_liq
+                )
+                st.success(f"✅ Liquidación guardada (ID: {liquidacion_id}) — Total a pagar: ${formatear_numero(t_pagar)}")
+                del st.session_state.df_viajes_liq
+                st.rerun()
+        elif 'df_viajes_liq' in st.session_state:
+            st.info("No se encontraron viajes de este conductor en el periodo seleccionado.")
+
+        st.divider()
+        st.subheader("📋 Liquidaciones Registradas")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            filtro_conductor_liq = st.selectbox(
+                "Filtrar por conductor",
+                ["Todos"] + [c.nombre for c in st.session_state.conductores],
+                key="filtro_liq_conductor"
+            )
+        with col2:
+            filtro_estado_liq = st.selectbox("Filtrar por estado", ["Todos", "Pendiente", "Pagada"], key="filtro_liq_estado")
+
+        cond_f = None if filtro_conductor_liq == "Todos" else filtro_conductor_liq
+        est_f = None if filtro_estado_liq == "Todos" else filtro_estado_liq
+        df_liquidaciones = db.obtener_liquidaciones(cond_f, est_f)
+
+        if df_liquidaciones.empty:
+            st.info("No hay liquidaciones registradas con estos filtros.")
+        else:
+            total_pendiente_liq = df_liquidaciones[df_liquidaciones['estado'] == 'Pendiente']['total_a_pagar'].sum()
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Total Liquidaciones", len(df_liquidaciones))
+            with col2:
+                st.metric("💰 Total Pendiente por Pagar", f"${formatear_numero(total_pendiente_liq)}")
+
+            for _, liq in df_liquidaciones.iterrows():
+                estado_icono = "🟢" if liq['estado'] == 'Pagada' else "🟡"
+                with st.expander(f"{estado_icono} {liq['conductor']} | {liq['periodo_inicio']} → {liq['periodo_fin']} | ${formatear_numero(liq['total_a_pagar'])} | {liq['estado']}"):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write(f"**Conductor:** {liq['conductor']}")
+                        st.write(f"**Periodo:** {liq['periodo_inicio']} a {liq['periodo_fin']}")
+                        st.write(f"**Cantidad de Viajes:** {liq['cantidad_viajes']}")
+                        st.write(f"**Total Nómina:** ${formatear_numero(liq['total_nomina'])}")
+                    with col2:
+                        st.write(f"**Total Comisiones:** ${formatear_numero(liq['total_comisiones'])}")
+                        st.write(f"**Total Anticipos:** ${formatear_numero(liq['total_anticipos'])}")
+                        st.write(f"**💰 TOTAL A PAGAR:** ${formatear_numero(liq['total_a_pagar'])}")
+                        st.write(f"**Estado:** {liq['estado']}" + (f" (pagada el {liq['fecha_pago']})" if liq['fecha_pago'] else ""))
+                    if liq['observaciones']:
+                        st.caption(f"📝 {liq['observaciones']}")
+
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        if liq['estado'] == 'Pendiente':
+                            if st.button("✅ Marcar como Pagada", key=f"pagar_liq_{liq['id']}"):
+                                db.marcar_liquidacion_pagada(liq['id'])
+                                st.success("Liquidación marcada como pagada")
+                                st.rerun()
+                    with col_b:
+                        if st.button("🗑️ Eliminar", key=f"eliminar_liq_{liq['id']}"):
+                            db.eliminar_liquidacion(liq['id'])
+                            st.success("Liquidación eliminada")
+                            st.rerun()
+
+    # ==================== TAB 9: CUENTAS PENDIENTES (POR PAGAR/COBRAR) ====================
+    with tab9:
+        st.header("⏰ Pagos Pendientes y Vencimientos")
+        st.caption("Controla lo que te deben (Por Cobrar: fletes de clientes) y lo que debes (Por Pagar: seguros, liquidaciones, proveedores, etc).")
+
+        st.subheader("➕ Registrar Nueva Cuenta")
+        with st.form(key="form_cuenta"):
+            col1, col2 = st.columns(2)
+            with col1:
+                tipo_cuenta = st.selectbox("Tipo", ["Por Cobrar", "Por Pagar"])
+                concepto_cuenta = st.text_input("Concepto", placeholder="Ej: Flete cliente XYZ, Seguro tractomula NOX459")
+                tercero_cuenta = st.text_input("Tercero (cliente/proveedor)", placeholder="Nombre de la empresa o persona")
+            with col2:
+                monto_cuenta_texto = st.text_input("Monto (COP)", value="", placeholder="0")
+                monto_cuenta = limpiar_numero(monto_cuenta_texto)
+                if monto_cuenta > 0:
+                    st.caption(f"💵 {formatear_numero(monto_cuenta)}")
+                fecha_vencimiento_cuenta = st.date_input("Fecha de Vencimiento", value=datetime.now().date())
+                observaciones_cuenta = st.text_area("Observaciones (opcional)")
+
+            submit_cuenta = st.form_submit_button("💾 Guardar Cuenta", type="primary")
+            if submit_cuenta:
+                if not concepto_cuenta or monto_cuenta <= 0:
+                    st.error("⚠️ Debes ingresar al menos el concepto y un monto mayor a cero.")
+                else:
+                    cuenta_id = db.guardar_cuenta(
+                        tipo_cuenta, concepto_cuenta, tercero_cuenta, monto_cuenta,
+                        fecha_vencimiento_cuenta, observaciones_cuenta
+                    )
+                    st.success(f"✅ Cuenta guardada (ID: {cuenta_id})")
+                    st.rerun()
+
+        st.divider()
+        st.subheader("📋 Cuentas Registradas")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            filtro_tipo_cuenta = st.selectbox("Filtrar por tipo", ["Todas", "Por Cobrar", "Por Pagar"], key="filtro_cuenta_tipo")
+        with col2:
+            filtro_estado_cuenta = st.selectbox("Filtrar por estado", ["Todas", "Pendiente", "Pagado"], key="filtro_cuenta_estado")
+
+        tipo_f = None if filtro_tipo_cuenta == "Todas" else filtro_tipo_cuenta
+        estado_f = None if filtro_estado_cuenta == "Todas" else filtro_estado_cuenta
+        df_cuentas = db.obtener_cuentas(tipo_f, estado_f)
+
+        if df_cuentas.empty:
+            st.info("No hay cuentas registradas con estos filtros.")
+        else:
+            hoy = datetime.now().date()
+            df_pendientes = df_cuentas[df_cuentas['estado'] == 'Pendiente']
+            total_por_cobrar = df_pendientes[df_pendientes['tipo'] == 'Por Cobrar']['monto'].sum()
+            total_por_pagar = df_pendientes[df_pendientes['tipo'] == 'Por Pagar']['monto'].sum()
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("💚 Total Por Cobrar (pendiente)", f"${formatear_numero(total_por_cobrar)}")
+            with col2:
+                st.metric("🔴 Total Por Pagar (pendiente)", f"${formatear_numero(total_por_pagar)}")
+            with col3:
+                balance = total_por_cobrar - total_por_pagar
+                st.metric("⚖️ Balance Neto", f"${formatear_numero(balance)}")
+
+            st.divider()
+
+            for _, cuenta in df_cuentas.iterrows():
+                fecha_venc = cuenta['fecha_vencimiento']
+                dias_para_vencer = (fecha_venc - hoy).days if cuenta['estado'] == 'Pendiente' else None
+
+                if cuenta['estado'] == 'Pagado':
+                    icono = "✅"
+                elif dias_para_vencer is not None and dias_para_vencer < 0:
+                    icono = "🔴"
+                elif dias_para_vencer is not None and dias_para_vencer <= 7:
+                    icono = "🟡"
+                else:
+                    icono = "🟢"
+
+                tipo_icono = "💚" if cuenta['tipo'] == 'Por Cobrar' else "🔴"
+
+                titulo = f"{icono} {tipo_icono} {cuenta['tipo']} | {cuenta['concepto']} | ${formatear_numero(cuenta['monto'])} | Vence: {fecha_venc}"
+                with st.expander(titulo):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write(f"**Tipo:** {cuenta['tipo']}")
+                        st.write(f"**Concepto:** {cuenta['concepto']}")
+                        st.write(f"**Tercero:** {cuenta['tercero'] or '-'}")
+                        st.write(f"**Monto:** ${formatear_numero(cuenta['monto'])}")
+                    with col2:
+                        st.write(f"**Fecha de Vencimiento:** {fecha_venc}")
+                        st.write(f"**Estado:** {cuenta['estado']}")
+                        if cuenta['estado'] == 'Pendiente' and dias_para_vencer is not None:
+                            if dias_para_vencer < 0:
+                                st.error(f"⚠️ VENCIDA hace {abs(dias_para_vencer)} días")
+                            elif dias_para_vencer <= 7:
+                                st.warning(f"⏰ Vence en {dias_para_vencer} días")
+                            else:
+                                st.success(f"Vence en {dias_para_vencer} días")
+                        if cuenta['fecha_pago']:
+                            st.write(f"**Fecha de Pago:** {cuenta['fecha_pago']}")
+                    if cuenta['observaciones']:
+                        st.caption(f"📝 {cuenta['observaciones']}")
+
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        if cuenta['estado'] == 'Pendiente':
+                            if st.button("✅ Marcar como Pagado", key=f"pagar_cuenta_{cuenta['id']}"):
+                                db.marcar_cuenta_pagada(cuenta['id'])
+                                st.success("Cuenta marcada como pagada")
+                                st.rerun()
+                    with col_b:
+                        if st.button("🗑️ Eliminar", key=f"eliminar_cuenta_{cuenta['id']}"):
+                            db.eliminar_cuenta(cuenta['id'])
+                            st.success("Cuenta eliminada")
+                            st.rerun()
 
 
 if __name__ == "__main__":
