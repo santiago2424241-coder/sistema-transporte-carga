@@ -1503,17 +1503,50 @@ def main():
             st.markdown("**Valores por defecto de gastos variables (opcional, se autocompletan en cada viaje)**")
             col1, col2, col3 = st.columns(3)
             with col1:
-                default_flypass = st.number_input("Flypass default (COP)", min_value=0.0, step=1000.0)
-                default_peajes = st.number_input("Peajes default (COP)", min_value=0.0, step=1000.0)
-                default_urea_acpm = st.number_input("Urea y/o ACPM default (COP)", min_value=0.0, step=1000.0)
+                default_flypass_texto = st.text_input("Flypass default (COP)", value="", placeholder="0")
+                default_flypass = limpiar_numero(default_flypass_texto)
+                if default_flypass > 0:
+                    st.caption(f"💵 {formatear_numero(default_flypass)}")
+
+                default_peajes_texto = st.text_input("Peajes default (COP)", value="", placeholder="0")
+                default_peajes = limpiar_numero(default_peajes_texto)
+                if default_peajes > 0:
+                    st.caption(f"💵 {formatear_numero(default_peajes)}")
+
+                default_urea_acpm_texto = st.text_input("Urea y/o ACPM default (COP)", value="", placeholder="0")
+                default_urea_acpm = limpiar_numero(default_urea_acpm_texto)
+                if default_urea_acpm > 0:
+                    st.caption(f"💵 {formatear_numero(default_urea_acpm)}")
             with col2:
-                default_hotel = st.number_input("Hotel default (COP)", min_value=0.0, step=1000.0)
-                default_comida = st.number_input("Comida default (COP)", min_value=0.0, step=1000.0)
-                default_transporte = st.number_input("Transporte default (COP)", min_value=0.0, step=1000.0)
+                default_hotel_texto = st.text_input("Hotel default (COP)", value="", placeholder="0")
+                default_hotel = limpiar_numero(default_hotel_texto)
+                if default_hotel > 0:
+                    st.caption(f"💵 {formatear_numero(default_hotel)}")
+
+                default_comida_texto = st.text_input("Comida default (COP)", value="", placeholder="0")
+                default_comida = limpiar_numero(default_comida_texto)
+                if default_comida > 0:
+                    st.caption(f"💵 {formatear_numero(default_comida)}")
+
+                default_transporte_texto = st.text_input("Transporte default (COP)", value="", placeholder="0")
+                default_transporte = limpiar_numero(default_transporte_texto)
+                if default_transporte > 0:
+                    st.caption(f"💵 {formatear_numero(default_transporte)}")
             with col3:
-                default_propina_comision = st.number_input("Propina/Comisión default (COP)", min_value=0.0, step=1000.0)
-                default_cargue_descargue = st.number_input("Cargue/Descargue-Amarre default (COP)", min_value=0.0, step=1000.0)
-                default_otros = st.number_input("Otros default (COP)", min_value=0.0, step=1000.0)
+                default_propina_comision_texto = st.text_input("Propina/Comisión default (COP)", value="", placeholder="0")
+                default_propina_comision = limpiar_numero(default_propina_comision_texto)
+                if default_propina_comision > 0:
+                    st.caption(f"💵 {formatear_numero(default_propina_comision)}")
+
+                default_cargue_descargue_texto = st.text_input("Cargue/Descargue-Amarre default (COP)", value="", placeholder="0")
+                default_cargue_descargue = limpiar_numero(default_cargue_descargue_texto)
+                if default_cargue_descargue > 0:
+                    st.caption(f"💵 {formatear_numero(default_cargue_descargue)}")
+
+                default_otros_texto = st.text_input("Otros default (COP)", value="", placeholder="0")
+                default_otros = limpiar_numero(default_otros_texto)
+                if default_otros > 0:
+                    st.caption(f"💵 {formatear_numero(default_otros)}")
 
             submit = st.form_submit_button("Agregar Ruta")
             if submit and origen and destino:
