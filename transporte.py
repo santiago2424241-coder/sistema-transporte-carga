@@ -2199,6 +2199,9 @@ def main():
             viaje_id_seleccionado = st.selectbox("Selecciona un viaje por ID", df_viajes['id'].tolist())
 
             if st.button("Ver Detalle Completo"):
+                st.session_state.mostrar_detalle_viaje_id = viaje_id_seleccionado
+
+            if st.session_state.get('mostrar_detalle_viaje_id') == viaje_id_seleccionado:
                 viaje = db.obtener_viaje_por_id(viaje_id_seleccionado)
                 if viaje:
                     col1, col2 = st.columns(2)
@@ -2542,12 +2545,10 @@ def main():
             placas_preview = ", ".join(sorted(df_viajes_liq['placa'].unique()))
             total_comisiones_preview = float(df_viajes_liq['comision_conductor'].sum())
 
-            col1, col2, col3 = st.columns(3)
+            col1, col2 = st.columns(2)
             with col1:
                 st.metric("🚛 Cantidad de Viajes", cantidad_viajes_preview)
             with col2:
-                st.metric("Placas", placas_preview if placas_preview else "-")
-            with col3:
                 st.metric("💰 TOTAL A PAGAR (Comisiones)", f"${formatear_numero(total_comisiones_preview)}")
 
             observaciones_liq = st.text_area("Observaciones de la liquidación (opcional)", key="liq_obs")
@@ -2601,7 +2602,6 @@ def main():
                         st.write(f"**Conductor:** {liq['conductor']}")
                         st.write(f"**Periodo:** {liq['periodo_inicio']} a {liq['periodo_fin']}")
                         st.write(f"**🚛 Cantidad de Viajes:** {liq['cantidad_viajes']}")
-                        st.write(f"**Placas:** {liq['placas'] if liq['placas'] else '-'}")
                     with col2:
                         st.write(f"**💰 TOTAL A PAGAR (Comisiones):** ${formatear_numero(liq['total_a_pagar'])}")
                         st.write(f"**Estado:** {liq['estado']}" + (f" (pagada el {liq['fecha_pago']})" if liq['fecha_pago'] else ""))
