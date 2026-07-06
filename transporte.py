@@ -1,4 +1,3 @@
-"""
 Sistema de Programación de Rutas y Cálculo de Costos para Tractomulas
 Versión 4.3 - Conectado a Supabase (PostgreSQL) - ACTUALIZADO
 Contexto: Colombia
@@ -62,6 +61,12 @@ CAMBIOS EN ESTA VERSIÓN (v4.3 - AUTOMATIZACIÓN CLIENTE AGOFER / URBANO):
   viaje particular es distinto.
 - NUEVO: se guarda el campo "peso" en la base de datos (columna nueva en
   viajes_v4), visible también en Trazabilidad.
+
+CAMBIOS EN ESTA VERSIÓN (v4.4 - NAVEGACIÓN PERSISTENTE):
+- CORREGIDO: al guardar cualquier registro (tractomula, ruta, conductor,
+  viaje, liquidación, cuenta) y hacer st.rerun(), la app ya NO te regresa
+  al Dashboard. Se reemplazó st.tabs() (que no conserva la pestaña activa
+  entre reruns) por una navegación manual basada en st.session_state.
 """
 
 import streamlit as st
@@ -1751,7 +1756,13 @@ def main():
 - Punto de equilibrio: Valor Flete x {int(datos.PUNTO_EQUILIBRIO_PORCENTAJE*100)}%
         """)
 
-    tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
+    # ==================== NAVEGACIÓN PERSISTENTE (NUEVO v4.4) ====================
+    # Antes se usaba st.tabs(), que NO conserva la pestaña activa cuando el
+    # script hace st.rerun() (por ejemplo al guardar una tractomula, ruta,
+    # conductor, viaje, liquidación o cuenta). Por eso la app "saltaba" al
+    # Dashboard después de cada guardado. Ahora la pestaña activa se guarda
+    # en st.session_state y se restaura en cada rerun.
+    opciones_tabs = [
         "📊 Dashboard",
         "1. Tractomulas",
         "2. Rutas",
@@ -1762,11 +1773,24 @@ def main():
         "7. Acumulado por Flota",
         "8. 💵 Liquidaciones",
         "9. ⏰ Cuentas Pendientes",
-        "10. ⛽ Sobreconsumo"
-    ])
+        "10. ⛽ Sobreconsumo",
+    ]
+
+    if 'tab_actual' not in st.session_state:
+        st.session_state.tab_actual = opciones_tabs[0]
+
+    st.session_state.tab_actual = st.radio(
+        "Navegación",
+        opciones_tabs,
+        horizontal=True,
+        index=opciones_tabs.index(st.session_state.tab_actual),
+        key="selector_tab_nav",
+        label_visibility="collapsed",
+    )
+    tab_actual = st.session_state.tab_actual
 
     # ==================== TAB 0: DASHBOARD ====================
-    with tab0:
+    if tab_actual == opciones_tabs[0]:
         st.header("📊 Dashboard - Resumen de tu Negocio")
 
         # NUEVO v4.1: cache de 20s para no recalcular todo el dashboard en
@@ -1912,7 +1936,7 @@ def main():
             st.info("No hay datos para comparar")
 
     # ==================== TAB 1: TRACTOMULAS ====================
-    with tab1:
+    if tab_actual == opciones_tabs[1]:
         st.header("Tus Tractomulas")
         with st.form(key="form_tractomula"):
             col1, col2 = st.columns(2)
@@ -1953,7 +1977,7 @@ def main():
                         st.rerun()
 
     # ==================== TAB 2: RUTAS ====================
-    with tab2:
+    if tab_actual == opciones_tabs[2]:
         st.header("Tus Rutas")
         st.caption("💡 Los valores por defecto se autocompletan en cada viaje nuevo con esta ruta (puedes editarlos si cambian).")
         with st.form(key="form_ruta"):
@@ -2081,7 +2105,7 @@ def main():
                         st.rerun()
 
     # ==================== TAB 3: CONDUCTORES ====================
-    with tab3:
+    if tab_actual == opciones_tabs[3]:
         st.header("Tus Conductores")
 
         if 'conductores_cedulas' not in st.session_state:
@@ -2144,7 +2168,7 @@ def main():
                         st.rerun()
 
     # ==================== TAB 4: CÁLCULO DE VIAJE ====================
-    with tab4:
+    if tab_actual == opciones_tabs[4]:
         st.header("Realizar Cálculo de Viaje")
         if not (st.session_state.tractomulas and st.session_state.conductores and st.session_state.rutas):
             st.warning("⚠️ Primero agrega al menos una tractomula, un conductor y una ruta.")
@@ -2187,7 +2211,7 @@ def main():
                     "⚖️ Peso transportado (kg)",
                     value="",
                     placeholder="Ejemplo: 30.000",
-                    help="Peso de la carga en kilogramos. Se usa para calcular automáticamente el Flete cuando el cliente es AGOFER en rutas urbanas (Flete = Peso x 27.500 x N° de Viajes).",
+                    help="Peso de la carga en kilogramos (NO en toneladas). Se usa para calcular automáticamente el Flete cuando el cliente es AGOFER en rutas urbanas (Flete = Peso x 27.500 x N° de Viajes).",
                     key="sel_peso"
                 )
                 peso = limpiar_numero(peso_texto)
@@ -2398,7 +2422,7 @@ def main():
                             st.success("✅ Cálculo completado! Ve a la pestaña de Reportes.")
 
     # ==================== TAB 5: REPORTES ====================
-    with tab5:
+    if tab_actual == opciones_tabs[5]:
         st.header("📄 Reportes y Descargas")
         if st.session_state.calculadoras:
             for idx, calc in enumerate(st.session_state.calculadoras, 1):
@@ -2427,7 +2451,7 @@ def main():
             st.info("Realiza al menos un cálculo en la pestaña anterior para ver reportes.")
 
     # ==================== TAB 6: TRAZABILIDAD ====================
-    with tab6:
+    if tab_actual == opciones_tabs[6]:
         st.header("📂 Trazabilidad de Viajes")
         st.markdown("Historial completo de todos los viajes guardados en el sistema.")
 
@@ -2817,7 +2841,7 @@ def main():
             st.dataframe(rutas_df, use_container_width=True, hide_index=True)
 
     # ==================== TAB 7: ACUMULADO POR FLOTA ====================
-    with tab7:
+    if tab_actual == opciones_tabs[7]:
         st.header("Acumulado por Flota")
         st.markdown("Acumulados totales por unidad (tractomula/placa)")
 
@@ -2888,7 +2912,7 @@ def main():
             st.plotly_chart(fig_rentabilidad)
 
     # ==================== TAB 8: LIQUIDACIONES DE CONDUCTORES ====================
-    with tab8:
+    if tab_actual == opciones_tabs[8]:
         st.header("💵 Liquidaciones de Conductores")
         st.caption("Muestra cuántos viajes hizo el conductor, en qué placas, y el Total de Comisiones a pagar en el periodo (ej. quincena).")
 
@@ -3002,7 +3026,7 @@ def main():
                             st.rerun()
 
     # ==================== TAB 9: CUENTAS PENDIENTES (POR PAGAR/COBRAR) ====================
-    with tab9:
+    if tab_actual == opciones_tabs[9]:
         st.header("⏰ Pagos Pendientes y Vencimientos")
         st.caption("Controla lo que te deben (Por Cobrar: fletes de clientes) y lo que debes (Por Pagar: seguros, liquidaciones, proveedores, etc).")
 
@@ -3117,7 +3141,7 @@ def main():
                             st.rerun()
 
     # ==================== TAB 10: SOBRECONSUMO DE COMBUSTIBLE ====================
-    with tab10:
+    if tab_actual == opciones_tabs[10]:
         st.header("⛽ Detección de Sobreconsumo de Combustible")
         st.caption("Compara los galones que TEÓRICAMENTE debió gastar cada viaje (según distancia y rendimiento) contra los galones REALES que compraste. Solo aparecen aquí los viajes donde registraste el dato real.")
 
