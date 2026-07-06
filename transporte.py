@@ -253,13 +253,11 @@ class DatabaseManager:
         except Exception as e:
             st.error(f"Error inicializando base de datos: {e}")
 
-    def guardar_viaje(self, calculadora, fecha_viaje, observaciones="", cliente="", galones_reales=None):
+    def guardar_viaje(self, calculadora, fecha_viaje, observaciones="", cliente=""):
         """Guarda un viaje en la base de datos de forma segura con HORA COLOMBIA.
         fecha_viaje: fecha real en la que ocurrió el viaje (objeto date), distinta de
         fecha_creacion que es cuándo se registró en el sistema.
-        cliente: nombre del cliente/empresa para quien se hizo el flete (trazabilidad por cliente).
-        galones_reales: galones realmente comprados/cargados (opcional), para detectar sobreconsumo
-        comparándolo contra los galones_necesarios teóricos."""
+        cliente: nombre del cliente/empresa para quien se hizo el flete (trazabilidad por cliente)."""
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -268,7 +266,6 @@ class DatabaseManager:
             hora_colombia = datetime.now() - timedelta(hours=5)
             fecha_actual = hora_colombia.strftime('%Y-%m-%d %H:%M:%S')
             fecha_viaje_str = fecha_viaje.strftime('%Y-%m-%d') if fecha_viaje else fecha_actual[:10]
-            galones_reales_val = float(galones_reales) if galones_reales else None
 
             datos_viaje = (
                 fecha_actual,
@@ -315,7 +312,6 @@ class DatabaseManager:
                 float(calculadora.propina_comision),
                 fecha_viaje_str,
                 str(cliente),
-                galones_reales_val,
             )
 
             sql_insert = '''
@@ -328,13 +324,13 @@ class DatabaseManager:
                     total_gastos, legalizacion, punto_equilibrio, valor_flete,
                     utilidad, rentabilidad, anticipo, saldo, hubo_anticipo_empresa,
                     ant_empresa, saldo_empresa, observaciones,
-                    urea_acpm, transporte, propina_comision, fecha_viaje, cliente, galones_reales
+                    urea_acpm, transporte, propina_comision, fecha_viaje, cliente
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s
                 ) RETURNING id
             '''
 
@@ -2052,17 +2048,6 @@ def main():
                     anticipo = limpiar_numero(anticipo_texto)
                     if anticipo > 0:
                         st.caption(f"💵 {formatear_numero(anticipo)}")
-                with col2:
-                    galones_reales = st.number_input(
-                        "⛽ Galones Reales Comprados (opcional)",
-                        min_value=0.0, value=0.0, step=1.0,
-                        help="Si registras cuánto combustible compraste realmente, el sistema podrá detectar sobreconsumo comparándolo contra el galonaje teórico (Pestaña ⛽ Sobreconsumo)."
-                    )
-                    galones_teoricos_preview = (
-                        ruta_obj.distancia_km / tractomula_obj.consumo_km_galon
-                        if tractomula_obj.consumo_km_galon > 0 else 0
-                    )
-                    st.caption(f"📐 Teórico para esta ruta: {formatear_decimal(galones_teoricos_preview)} gal")
 
                 st.divider()
                 st.subheader("💰 Valor del Flete")
@@ -2122,7 +2107,7 @@ def main():
                         st.session_state.calculadoras.append(calculadora)
 
                         if guardar:
-                            viaje_id = db.guardar_viaje(calculadora, fecha_viaje, observaciones, cliente_viaje, galones_reales)
+                            viaje_id = db.guardar_viaje(calculadora, fecha_viaje, observaciones, cliente_viaje)
                             if viaje_id:
                                 costos = calculadora.calcular_costos_totales()
                                 utilidad = costos.get('utilidad', 0)
@@ -2439,13 +2424,6 @@ def main():
                             edit_cliente = st.text_input(
                                 "🏢 Cliente", value=(viaje[44] if len(viaje) > 44 and viaje[44] else ""), key="edit_cliente"
                             )
-                            edit_galones_reales = st.number_input(
-                                "⛽ Galones Reales Comprados (opcional)",
-                                min_value=0.0,
-                                value=float(viaje[45]) if len(viaje) > 45 and viaje[45] else 0.0,
-                                step=1.0,
-                                key="edit_galones_reales"
-                            )
                             edit_observaciones = st.text_area("Observaciones", value=viaje[39] if viaje[39] else "", key="edit_obs")
 
                             col_guardar, col_cancelar = st.columns(2)
@@ -2462,7 +2440,7 @@ def main():
                                         edit_transporte, edit_propina, edit_cargue, edit_otros,
                                         edit_valor_flete, edit_anticipo, edit_hubo_ant_empresa, datos
                                     )
-                                    exito = db.actualizar_viaje(viaje_id_seleccionado, calculadora_editada, edit_fecha_viaje, edit_observaciones, edit_cliente, edit_galones_reales)
+                                    exito = db.actualizar_viaje(viaje_id_seleccionado, calculadora_editada, edit_fecha_viaje, edit_observaciones, edit_cliente)
                                     if exito:
                                         st.success("✅ Viaje actualizado correctamente")
                                         del st.session_state.editando_viaje_id
