@@ -1,3 +1,4 @@
+"""
 Sistema de Programación de Rutas y Cálculo de Costos para Tractomulas
 Versión 4.3 - Conectado a Supabase (PostgreSQL) - ACTUALIZADO
 Contexto: Colombia
