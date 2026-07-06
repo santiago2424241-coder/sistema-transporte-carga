@@ -36,6 +36,15 @@ CAMBIOS EN ESTA VERSIÓN (v4.1 - OPTIMIZACIÓN DE RENDIMIENTO):
     CREATE INDEX IF NOT EXISTS idx_viajes_origen_trgm ON viajes_v4 USING gin (origen gin_trgm_ops);
     CREATE INDEX IF NOT EXISTS idx_viajes_destino_trgm ON viajes_v4 USING gin (destino gin_trgm_ops);
     CREATE INDEX IF NOT EXISTS idx_viajes_cliente_trgm ON viajes_v4 USING gin (cliente gin_trgm_ops);
+
+CAMBIOS EN ESTA VERSIÓN (v4.2):
+- NUEVO: Campo "Número de Viajes" en el Cálculo de Viaje (Tab 4) y en la
+  Edición de Viaje (Tab 6). Representa cuántos viajes hizo el conductor
+  ese día.
+- CAMBIO DE FÓRMULA: Comisión Conductor Urbano/Normal ahora es
+  $120.000 x NÚMERO DE VIAJES (antes era $120.000 x días de viaje).
+  Las demás comisiones (Regional, Aguachica, Riohacha, Frontera) siguen
+  siendo fijas, sin cambios.
 """
 
 import streamlit as st
@@ -220,6 +229,9 @@ class DatabaseManager:
             # --- MIGRACIÓN: galones reales comprados (para detectar sobreconsumo vs el teórico) ---
             cursor.execute("ALTER TABLE viajes_v4 ADD COLUMN IF NOT EXISTS galones_reales REAL")
 
+            # --- MIGRACIÓN (v4.2): número de viajes del día (para la comisión urbana) ---
+            cursor.execute("ALTER TABLE viajes_v4 ADD COLUMN IF NOT EXISTS numero_viajes INTEGER DEFAULT 1")
+
             # Tabla de tractomulas
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS tractomulas (
@@ -368,6 +380,7 @@ class DatabaseManager:
                 float(calculadora.propina_comision),
                 fecha_viaje_str,
                 str(cliente),
+                int(calculadora.numero_viajes),
             )
 
             sql_insert = '''
@@ -380,13 +393,14 @@ class DatabaseManager:
                     total_gastos, legalizacion, punto_equilibrio, valor_flete,
                     utilidad, rentabilidad, anticipo, saldo, hubo_anticipo_empresa,
                     ant_empresa, saldo_empresa, observaciones,
-                    urea_acpm, transporte, propina_comision, fecha_viaje, cliente
+                    urea_acpm, transporte, propina_comision, fecha_viaje, cliente,
+                    numero_viajes
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s
                 ) RETURNING id
             '''
 
@@ -484,7 +498,7 @@ class DatabaseManager:
                     utilidad = %s, rentabilidad = %s, anticipo = %s, saldo = %s,
                     hubo_anticipo_empresa = %s, ant_empresa = %s, saldo_empresa = %s,
                     observaciones = %s, urea_acpm = %s, transporte = %s, propina_comision = %s,
-                    fecha_viaje = %s, cliente = %s, galones_reales = %s
+                    fecha_viaje = %s, cliente = %s, galones_reales = %s, numero_viajes = %s
                 WHERE id = %s
             ''', (
                 str(calculadora.tractomula.placa), str(calculadora.conductor.nombre),
@@ -502,7 +516,8 @@ class DatabaseManager:
                 float(calculadora.anticipo), costos['saldo'],
                 1 if calculadora.hubo_anticipo_empresa else 0, costos['ant_empresa'], costos['saldo_empresa'],
                 str(observaciones), float(calculadora.urea_acpm), float(calculadora.transporte),
-                float(calculadora.propina_comision), fecha_viaje_str, str(cliente), galones_reales_val, viaje_id
+                float(calculadora.propina_comision), fecha_viaje_str, str(cliente), galones_reales_val,
+                int(calculadora.numero_viajes), viaje_id
             ))
             conn.commit()
             self.release_connection(conn)
@@ -1043,11 +1058,11 @@ class DatosColombia:
     NOMINA_CONDUCTOR_DIA = 20000
 
     # --- Comisión conductor (ACTUALIZADA) ---
-    COMISION_URBANO_DIA = 120000     # antes: fijo $100.000 -> ahora: $120.000 x días de viaje
-    COMISION_FRONTERA = 565000       # antes: $500.000
-    COMISION_REGIONAL = 200000       # antes: $180.000
-    COMISION_AGUACHICA = 360000      # antes: $350.000
-    COMISION_RIOACHA = 350000        # NUEVO
+    COMISION_URBANO_DIA = 120000     # $120.000 x NÚMERO DE VIAJES del día (v4.2, antes era x días de viaje)
+    COMISION_FRONTERA = 565000       # fija
+    COMISION_REGIONAL = 200000       # fija
+    COMISION_AGUACHICA = 360000      # fija
+    COMISION_RIOACHA = 350000        # fija
 
     MANTENIMIENTO_MENSUAL = 1500000
     SEGURO_1 = 1400000
@@ -1089,10 +1104,10 @@ PLACA_CONDUCTOR = {
 
 # ==================== CALCULADORA DE COSTOS ====================
 class CalculadoraCostos:
-    """Calcula todos los costos del viaje con fórmulas ACTUALIZADAS v4.0"""
+    """Calcula todos los costos del viaje con fórmulas ACTUALIZADAS v4.2"""
 
     def __init__(self, tractomula: Tractomula, conductor: Conductor, ruta: Ruta,
-                 dias_viaje: int, es_frontera: bool, hubo_parqueo: bool,
+                 dias_viaje: int, numero_viajes: int, es_frontera: bool, hubo_parqueo: bool,
                  flypass: float, peajes: float, urea_acpm: float, hotel: float,
                  comida: float, transporte: float, propina_comision: float,
                  cargue_descargue: float, otros: float, valor_flete: float,
@@ -1101,6 +1116,7 @@ class CalculadoraCostos:
         self.conductor = conductor
         self.ruta = ruta
         self.dias_viaje = dias_viaje
+        self.numero_viajes = numero_viajes    # NUEVO v4.2
         self.es_frontera = es_frontera
         self.hubo_parqueo = hubo_parqueo
         self.flypass = flypass
@@ -1124,12 +1140,12 @@ class CalculadoraCostos:
         return self.datos.NOMINA_CONDUCTOR_DIA * self.dias_viaje
 
     def calcular_comision_conductor(self) -> float:
-        """ACTUALIZADO:
+        """ACTUALIZADO v4.2:
         - Aguachica -> $360.000 fijo
-        - Riohacha  -> $350.000 fijo (NUEVO)
+        - Riohacha  -> $350.000 fijo
         - Regional  -> $200.000 fijo
         - Frontera  -> $565.000 fijo
-        - Urbano/Normal -> $120.000 x días de viaje (antes era fijo $100.000)
+        - Urbano/Normal -> $120.000 x NÚMERO DE VIAJES del día (antes era x días de viaje)
         """
         if self.ruta.es_aguachica:
             return self.datos.COMISION_AGUACHICA
@@ -1140,7 +1156,7 @@ class CalculadoraCostos:
         elif self.es_frontera:
             return self.datos.COMISION_FRONTERA
         else:
-            return self.datos.COMISION_URBANO_DIA * self.dias_viaje
+            return self.datos.COMISION_URBANO_DIA * self.numero_viajes
 
     def calcular_mantenimiento(self) -> float:
         return (self.datos.MANTENIMIENTO_MENSUAL / 30) * self.dias_viaje
@@ -1270,6 +1286,7 @@ INFORMACIÓN DEL VIAJE
 Ruta: {calculadora.ruta.origen} → {calculadora.ruta.destino}
 Distancia: {formatear_numero(calculadora.ruta.distancia_km)} km
 Días del viaje: {calculadora.dias_viaje}
+Número de viajes: {calculadora.numero_viajes}
 Galones necesarios: {formatear_decimal(costos['galones_necesarios'])} gal
 Es frontera: {'Sí' if calculadora.es_frontera else 'No'}
 Es regional: {'Sí' if calculadora.ruta.es_regional else 'No'}
@@ -1353,18 +1370,18 @@ Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         ws_resumen = wb.active
         ws_resumen.title = "Resumen General"
 
-        ws_resumen.merge_cells('A1:M1')
+        ws_resumen.merge_cells('A1:N1')
         cell = ws_resumen['A1']
         cell.value = "REPORTE DE COSTOS - TRANSPORTE DE CARGA COLOMBIA"
         cell.font = Font(size=14, bold=True, color="1F4E78")
         cell.alignment = Alignment(horizontal='center', vertical='center')
 
-        ws_resumen.merge_cells('A2:M2')
+        ws_resumen.merge_cells('A2:N2')
         ws_resumen['A2'] = f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         ws_resumen['A2'].alignment = Alignment(horizontal='center')
 
         row = 4
-        headers = ['Ruta', 'Placa', 'Conductor', 'Distancia (km)', 'Días', 'Galones',
+        headers = ['Ruta', 'Placa', 'Conductor', 'Distancia (km)', 'Días', 'N° Viajes', 'Galones',
                    'Combustible', 'Total Gastos', 'Anticipo', 'Saldo', 'Valor Flete',
                    'Utilidad', 'Rentabilidad %']
 
@@ -1387,6 +1404,7 @@ Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                 calc.conductor.nombre,
                 calc.ruta.distancia_km,
                 calc.dias_viaje,
+                calc.numero_viajes,
                 costos['galones_necesarios'],
                 costos['combustible'],
                 costos['total_gastos'],
@@ -1407,10 +1425,12 @@ Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                 elif col == 5:
                     cell.number_format = '#,##0'
                 elif col == 6:
+                    cell.number_format = '#,##0'
+                elif col == 7:
                     cell.number_format = '#,##0.00'
-                elif col >= 7 and col <= 12:
+                elif col >= 8 and col <= 13:
                     cell.number_format = '$#,##0'
-                elif col == 13:
+                elif col == 14:
                     cell.number_format = '#,##0.0"%"'
                 else:
                     cell.number_format = '#,##0'
@@ -1420,7 +1440,7 @@ Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         ws_resumen.column_dimensions['A'].width = 30
         ws_resumen.column_dimensions['B'].width = 12
         ws_resumen.column_dimensions['C'].width = 28
-        for col in ['D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M']:
+        for col in ['D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N']:
             ws_resumen.column_dimensions[col].width = 16
 
         for idx, calc in enumerate(calculadoras, start=1):
@@ -1431,6 +1451,9 @@ Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             ws['A1'] = f"{calc.ruta.origen} → {calc.ruta.destino}"
             ws['A1'].font = Font(size=14, bold=True, color="1F4E78")
             ws['A1'].alignment = Alignment(horizontal='center')
+
+            ws['A2'] = f"Días: {calc.dias_viaje}   |   Número de viajes: {calc.numero_viajes}"
+            ws['A2'].font = Font(italic=True, color="555555")
 
             row = 3
 
@@ -1611,14 +1634,14 @@ def main():
 
         st.divider()
         st.subheader("📊 Constantes del Negocio")
-        st.caption("Valores fijos según fórmulas ACTUALIZADAS v4.0")
+        st.caption("Valores fijos según fórmulas ACTUALIZADAS v4.2")
         st.info(f"""
 **Nóminas:**
 - Admin base: ${formatear_numero(datos.NOMINA_ADMIN_BASE)} / 14
 - Conductor/día: ${formatear_numero(datos.NOMINA_CONDUCTOR_DIA)}
 
 **Comisiones conductor:**
-- Urbano/Normal: ${formatear_numero(datos.COMISION_URBANO_DIA)} x día
+- Urbano/Normal: ${formatear_numero(datos.COMISION_URBANO_DIA)} x N° de viajes del día
 - Regional: ${formatear_numero(datos.COMISION_REGIONAL)}
 - Riohacha: ${formatear_numero(datos.COMISION_RIOACHA)}
 - Aguachica: ${formatear_numero(datos.COMISION_AGUACHICA)}
@@ -1949,7 +1972,7 @@ def main():
                     if es_rioh:
                         tags.append("🏖️ RIOHACHA ($350k)")
 
-                    tags_str = " ".join(tags) if tags else "🚛 URBANO ($120k x día)"
+                    tags_str = " ".join(tags) if tags else "🚛 URBANO ($120k x N° viajes)"
                     st.write(f"**{origen}** → **{destino}** ({formatear_numero(dist)} km) {tags_str}")
                 with col2:
                     if st.button("🗑️", key=f"eliminar_ruta_{ruta_id}"):
@@ -2043,6 +2066,11 @@ def main():
                 ruta_selec = st.selectbox("Selecciona Ruta", [f"{r.origen} → {r.destino}" for r in st.session_state.rutas], key="sel_ruta")
                 ruta_obj = next(r for r in st.session_state.rutas if f"{r.origen} → {r.destino}" == ruta_selec)
                 dias_viaje = st.number_input("Días del viaje", min_value=1, value=1, step=1, key="sel_dias")
+                numero_viajes = st.number_input(
+                    "🚛 Número de viajes",
+                    min_value=1, value=1, step=1, key="sel_numero_viajes",
+                    help="Cuántos viajes hizo el conductor este día. Solo afecta la Comisión Conductor Urbano/Normal: $120.000 x Número de Viajes. Las demás comisiones (Regional, Aguachica, Riohacha, Frontera) son fijas."
+                )
                 fecha_viaje = st.date_input(
                     "📅 Fecha del viaje",
                     value=datetime.now().date(),
@@ -2146,7 +2174,7 @@ def main():
                 if valor_flete > 0:
                     calc_preview = CalculadoraCostos(
                         tractomula_obj, conductor_obj, ruta_obj,
-                        dias_viaje, es_frontera, hubo_parqueo,
+                        dias_viaje, numero_viajes, es_frontera, hubo_parqueo,
                         flypass, peajes, urea_acpm, hotel, comida, transporte,
                         propina_comision, cargue_descargue, otros,
                         valor_flete, anticipo, hubo_anticipo_empresa, datos
@@ -2165,6 +2193,9 @@ def main():
                     with col4:
                         st.metric("Punto Equilibrio (40% Flete)", f"${formatear_numero(costos_preview['punto_equilibrio'])}")
 
+                    st.info(f"🚛 **Comisión Conductor calculada:** ${formatear_numero(costos_preview['comision_conductor'])} "
+                            f"(según la ruta: fija, o $120.000 x {numero_viajes} viaje(s) si es urbana)")
+
                 observaciones = st.text_area("Observaciones (opcional)", placeholder="Notas sobre este viaje...")
 
                 col_btn1, col_btn2 = st.columns(2)
@@ -2179,7 +2210,7 @@ def main():
                     else:
                         calculadora = CalculadoraCostos(
                             tractomula_obj, conductor_obj, ruta_obj,
-                            dias_viaje, es_frontera, hubo_parqueo,
+                            dias_viaje, numero_viajes, es_frontera, hubo_parqueo,
                             flypass, peajes, urea_acpm, hotel, comida, transporte,
                             propina_comision, cargue_descargue, otros,
                             valor_flete, anticipo, hubo_anticipo_empresa, datos
@@ -2196,6 +2227,7 @@ def main():
                                     ✅ **Viaje guardado exitosamente (ID: {viaje_id})**
 
                                     - Fecha del Viaje: {fecha_viaje.strftime('%Y-%m-%d')}
+                                    - Número de Viajes: {numero_viajes}
                                     - Total Gastos: ${formatear_numero(costos['total_gastos'])}
                                     - Valor Flete: ${formatear_numero(calculadora.valor_flete)}
                                     - **Utilidad: ${formatear_numero(utilidad)}**
@@ -2207,6 +2239,7 @@ def main():
                                     ⚠️ **Viaje guardado (ID: {viaje_id}) - PÉRDIDA DETECTADA**
 
                                     - Fecha del Viaje: {fecha_viaje.strftime('%Y-%m-%d')}
+                                    - Número de Viajes: {numero_viajes}
                                     - Total Gastos: ${formatear_numero(costos['total_gastos'])}
                                     - Valor Flete: ${formatear_numero(calculadora.valor_flete)}
                                     - **Pérdida: ${formatear_numero(utilidad)}**
@@ -2304,14 +2337,14 @@ def main():
 
             columnas_mostrar = [
                 'id', 'fecha_viaje', 'fecha_creacion', 'placa', 'conductor', 'origen', 'destino',
-                'cliente', 'distancia_km', 'dias_viaje', 'total_gastos', 'valor_flete',
+                'cliente', 'distancia_km', 'dias_viaje', 'numero_viajes', 'total_gastos', 'valor_flete',
                 'utilidad', 'rentabilidad'
             ]
 
             df_mostrar = df_viajes[columnas_mostrar].copy()
             df_mostrar.columns = [
                 'ID', 'Fecha del Viaje', 'Fecha Registro', 'Placa', 'Conductor', 'Origen', 'Destino',
-                'Cliente', 'Km', 'Días', 'Total Gastos', 'Valor Flete', 'Utilidad', 'Rentabilidad %'
+                'Cliente', 'Km', 'Días', 'N° Viajes', 'Total Gastos', 'Valor Flete', 'Utilidad', 'Rentabilidad %'
             ]
 
             df_mostrar['Total Gastos'] = df_mostrar['Total Gastos'].apply(lambda x: f"${formatear_numero(x)}")
@@ -2359,6 +2392,10 @@ def main():
                         st.write(f"**Ruta:** {viaje[4]} → {viaje[5]}")
                         st.write(f"**Distancia:** {formatear_numero(viaje[6])} km")
                         st.write(f"**Días:** {viaje[7]}")
+                        try:
+                            st.write(f"**🚛 Número de Viajes:** {viaje[46] if viaje[46] else 1}")
+                        except IndexError:
+                            pass
                         st.write(f"**Es Frontera:** {'Sí' if viaje[8] else 'No'}")
                         st.write(f"**Hubo Parqueo:** {'Sí' if viaje[9] else 'No'}")
 
@@ -2460,6 +2497,12 @@ def main():
                                 edit_conductor = st.selectbox("Conductor", conductores_disponibles, index=idx_conductor, key="edit_conductor")
                                 edit_ruta_str = st.selectbox("Ruta", rutas_disponibles, index=idx_ruta, key="edit_ruta")
                                 edit_dias = st.number_input("Días del viaje", min_value=1, value=int(viaje[7]), step=1, key="edit_dias")
+                                edit_numero_viajes = st.number_input(
+                                    "🚛 Número de viajes", min_value=1,
+                                    value=int(viaje[46]) if len(viaje) > 46 and viaje[46] else 1,
+                                    step=1, key="edit_numero_viajes",
+                                    help="Afecta la Comisión Conductor Urbano/Normal: $120.000 x Número de Viajes"
+                                )
                                 edit_fecha_viaje = st.date_input(
                                     "📅 Fecha del viaje",
                                     value=viaje[43] if len(viaje) > 43 and viaje[43] else datetime.now().date(),
@@ -2515,7 +2558,7 @@ def main():
 
                                     calculadora_editada = CalculadoraCostos(
                                         edit_tractomula_obj, edit_conductor_obj, edit_ruta_obj,
-                                        edit_dias, edit_es_frontera, edit_hubo_parqueo,
+                                        edit_dias, edit_numero_viajes, edit_es_frontera, edit_hubo_parqueo,
                                         edit_flypass, edit_peajes, edit_urea, edit_hotel, edit_comida,
                                         edit_transporte, edit_propina, edit_cargue, edit_otros,
                                         edit_valor_flete, edit_anticipo, edit_hubo_ant_empresa, datos
