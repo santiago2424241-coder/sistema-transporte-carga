@@ -159,6 +159,9 @@ class DatabaseManager:
                 WHERE fecha_viaje IS NULL
             """)
 
+            # --- MIGRACIÓN: cliente (para trazabilidad por cliente) ---
+            cursor.execute("ALTER TABLE viajes_v4 ADD COLUMN IF NOT EXISTS cliente TEXT")
+
             # Tabla de tractomulas
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS tractomulas (
@@ -247,10 +250,11 @@ class DatabaseManager:
         except Exception as e:
             st.error(f"Error inicializando base de datos: {e}")
 
-    def guardar_viaje(self, calculadora, fecha_viaje, observaciones=""):
+    def guardar_viaje(self, calculadora, fecha_viaje, observaciones="", cliente=""):
         """Guarda un viaje en la base de datos de forma segura con HORA COLOMBIA.
         fecha_viaje: fecha real en la que ocurrió el viaje (objeto date), distinta de
-        fecha_creacion que es cuándo se registró en el sistema."""
+        fecha_creacion que es cuándo se registró en el sistema.
+        cliente: nombre del cliente/empresa para quien se hizo el flete (trazabilidad por cliente)."""
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -304,6 +308,7 @@ class DatabaseManager:
                 float(calculadora.transporte),
                 float(calculadora.propina_comision),
                 fecha_viaje_str,
+                str(cliente),
             )
 
             sql_insert = '''
@@ -316,13 +321,13 @@ class DatabaseManager:
                     total_gastos, legalizacion, punto_equilibrio, valor_flete,
                     utilidad, rentabilidad, anticipo, saldo, hubo_anticipo_empresa,
                     ant_empresa, saldo_empresa, observaciones,
-                    urea_acpm, transporte, propina_comision, fecha_viaje
+                    urea_acpm, transporte, propina_comision, fecha_viaje, cliente
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s
+                    %s, %s, %s, %s, %s
                 ) RETURNING id
             '''
 
@@ -350,7 +355,7 @@ class DatabaseManager:
         conn.close()
         return df
 
-    def buscar_viajes(self, fecha_inicio=None, fecha_fin=None, placa=None, conductor=None, origen=None, destino=None):
+    def buscar_viajes(self, fecha_inicio=None, fecha_fin=None, placa=None, conductor=None, origen=None, destino=None, cliente=None):
         """Filtra por fecha_viaje (fecha real en que ocurrió el viaje), no por fecha_creacion
         (que es cuándo se registró en el sistema)."""
         conn = self.get_connection()
@@ -374,6 +379,9 @@ class DatabaseManager:
         if destino:
             query += " AND destino ILIKE %s"
             params.append(f"%{destino}%")
+        if cliente:
+            query += " AND cliente ILIKE %s"
+            params.append(f"%{cliente}%")
         query += " ORDER BY fecha_creacion DESC"
         df = pd.read_sql_query(query, conn, params=params)
         conn.close()
@@ -394,7 +402,7 @@ class DatabaseManager:
         conn.commit()
         conn.close()
 
-    def actualizar_viaje(self, viaje_id, calculadora, fecha_viaje, observaciones=""):
+    def actualizar_viaje(self, viaje_id, calculadora, fecha_viaje, observaciones="", cliente=""):
         """Recalcula y actualiza un viaje ya guardado (edición desde Trazabilidad).
         No modifica fecha_creacion (fecha de registro original)."""
         try:
@@ -416,7 +424,7 @@ class DatabaseManager:
                     utilidad = %s, rentabilidad = %s, anticipo = %s, saldo = %s,
                     hubo_anticipo_empresa = %s, ant_empresa = %s, saldo_empresa = %s,
                     observaciones = %s, urea_acpm = %s, transporte = %s, propina_comision = %s,
-                    fecha_viaje = %s
+                    fecha_viaje = %s, cliente = %s
                 WHERE id = %s
             ''', (
                 str(calculadora.tractomula.placa), str(calculadora.conductor.nombre),
@@ -434,7 +442,7 @@ class DatabaseManager:
                 float(calculadora.anticipo), costos['saldo'],
                 1 if calculadora.hubo_anticipo_empresa else 0, costos['ant_empresa'], costos['saldo_empresa'],
                 str(observaciones), float(calculadora.urea_acpm), float(calculadora.transporte),
-                float(calculadora.propina_comision), fecha_viaje_str, viaje_id
+                float(calculadora.propina_comision), fecha_viaje_str, str(cliente), viaje_id
             ))
             conn.commit()
             conn.close()
@@ -1932,6 +1940,13 @@ def main():
                     help="Fecha real en que ocurrió/ocurrirá el viaje (no la fecha en que lo registras). Se usa para todos los filtros de fecha del sistema.",
                     key="sel_fecha_viaje"
                 )
+                cliente_viaje = st.text_input(
+                    "🏢 Cliente",
+                    value="",
+                    placeholder="Nombre de la empresa o persona que contrató el flete",
+                    help="Para poder buscar y ver la trazabilidad de todos los viajes hechos para este cliente",
+                    key="sel_cliente"
+                )
 
             st.caption("💡 Los campos de gastos variables abajo ya vienen precargados con los valores por defecto de esta ruta. Puedes editarlos si el viaje tuvo un valor distinto.")
 
@@ -2063,7 +2078,7 @@ def main():
                         st.session_state.calculadoras.append(calculadora)
 
                         if guardar:
-                            viaje_id = db.guardar_viaje(calculadora, fecha_viaje, observaciones)
+                            viaje_id = db.guardar_viaje(calculadora, fecha_viaje, observaciones, cliente_viaje)
                             if viaje_id:
                                 costos = calculadora.calcular_costos_totales()
                                 utilidad = costos.get('utilidad', 0)
@@ -2143,6 +2158,8 @@ def main():
                 origen_filtro = st.text_input("Origen")
                 destino_filtro = st.text_input("Destino")
 
+            cliente_filtro = st.text_input("🏢 Cliente")
+
             buscar = st.button("🔍 Buscar", type="primary")
 
         if buscar or 'ultima_busqueda' not in st.session_state:
@@ -2152,8 +2169,9 @@ def main():
             conductor_f = conductor_filtro if conductor_filtro else None
             origen_f = origen_filtro if origen_filtro else None
             destino_f = destino_filtro if destino_filtro else None
+            cliente_f = cliente_filtro if cliente_filtro else None
 
-            df_viajes = db.buscar_viajes(fecha_ini, fecha_fi, placa_f, conductor_f, origen_f, destino_f)
+            df_viajes = db.buscar_viajes(fecha_ini, fecha_fi, placa_f, conductor_f, origen_f, destino_f, cliente_f)
             st.session_state.ultima_busqueda = df_viajes
         else:
             df_viajes = st.session_state.ultima_busqueda
@@ -2177,14 +2195,14 @@ def main():
 
             columnas_mostrar = [
                 'id', 'fecha_viaje', 'fecha_creacion', 'placa', 'conductor', 'origen', 'destino',
-                'distancia_km', 'dias_viaje', 'total_gastos', 'valor_flete',
+                'cliente', 'distancia_km', 'dias_viaje', 'total_gastos', 'valor_flete',
                 'utilidad', 'rentabilidad'
             ]
 
             df_mostrar = df_viajes[columnas_mostrar].copy()
             df_mostrar.columns = [
                 'ID', 'Fecha del Viaje', 'Fecha Registro', 'Placa', 'Conductor', 'Origen', 'Destino',
-                'Km', 'Días', 'Total Gastos', 'Valor Flete', 'Utilidad', 'Rentabilidad %'
+                'Cliente', 'Km', 'Días', 'Total Gastos', 'Valor Flete', 'Utilidad', 'Rentabilidad %'
             ]
 
             df_mostrar['Total Gastos'] = df_mostrar['Total Gastos'].apply(lambda x: f"${formatear_numero(x)}")
@@ -2195,7 +2213,17 @@ def main():
             st.dataframe(df_mostrar, use_container_width=True, height=400)
 
             st.subheader("Ver Detalle de Viaje")
-            viaje_id_seleccionado = st.selectbox("Selecciona un viaje por ID", df_viajes['id'].tolist())
+
+            def _etiqueta_viaje(vid):
+                fila = df_viajes[df_viajes['id'] == vid].iloc[0]
+                cliente_txt = f" | 🏢 {fila['cliente']}" if fila.get('cliente') else ""
+                return f"#{vid} — {fila['fecha_viaje']} — {fila['placa']} — {fila['origen']} → {fila['destino']}{cliente_txt}"
+
+            viaje_id_seleccionado = st.selectbox(
+                "Selecciona un viaje",
+                df_viajes['id'].tolist(),
+                format_func=_etiqueta_viaje
+            )
 
             if st.button("Ver Detalle Completo"):
                 st.session_state.mostrar_detalle_viaje_id = viaje_id_seleccionado
@@ -2214,6 +2242,10 @@ def main():
                         except IndexError:
                             pass
                         st.write(f"**Placa:** {viaje[2]}")
+                        try:
+                            st.write(f"**🏢 Cliente:** {viaje[44] if viaje[44] else '-'}")
+                        except IndexError:
+                            pass
                         st.write(f"**Conductor:** {viaje[3]}")
                         st.write(f"**Ruta:** {viaje[4]} → {viaje[5]}")
                         st.write(f"**Distancia:** {formatear_numero(viaje[6])} km")
@@ -2360,6 +2392,9 @@ def main():
                                 edit_anticipo_texto = st.text_input("Anticipo (COP)", value=formatear_numero(viaje[34]) if viaje[34] else "", key="edit_anticipo")
                                 edit_anticipo = limpiar_numero(edit_anticipo_texto)
 
+                            edit_cliente = st.text_input(
+                                "🏢 Cliente", value=(viaje[44] if len(viaje) > 44 and viaje[44] else ""), key="edit_cliente"
+                            )
                             edit_observaciones = st.text_area("Observaciones", value=viaje[39] if viaje[39] else "", key="edit_obs")
 
                             col_guardar, col_cancelar = st.columns(2)
@@ -2376,7 +2411,7 @@ def main():
                                         edit_transporte, edit_propina, edit_cargue, edit_otros,
                                         edit_valor_flete, edit_anticipo, edit_hubo_ant_empresa, datos
                                     )
-                                    exito = db.actualizar_viaje(viaje_id_seleccionado, calculadora_editada, edit_fecha_viaje, edit_observaciones)
+                                    exito = db.actualizar_viaje(viaje_id_seleccionado, calculadora_editada, edit_fecha_viaje, edit_observaciones, edit_cliente)
                                     if exito:
                                         st.success("✅ Viaje actualizado correctamente")
                                         del st.session_state.editando_viaje_id
