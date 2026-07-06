@@ -1,6 +1,6 @@
 """
 Sistema de Programación de Rutas y Cálculo de Costos para Tractomulas
-Versión 4.0 - Conectado a Supabase (PostgreSQL) - ACTUALIZADO
+Versión 4.3 - Conectado a Supabase (PostgreSQL) - ACTUALIZADO
 Contexto: Colombia
 Autor: Sistema de Gestión de Transporte de Carga
 
@@ -45,6 +45,23 @@ CAMBIOS EN ESTA VERSIÓN (v4.2):
   $120.000 x NÚMERO DE VIAJES (antes era $120.000 x días de viaje).
   Las demás comisiones (Regional, Aguachica, Riohacha, Frontera) siguen
   siendo fijas, sin cambios.
+
+CAMBIOS EN ESTA VERSIÓN (v4.3 - AUTOMATIZACIÓN CLIENTE AGOFER / URBANO):
+- NUEVO: Campo "Peso (kg)" en el Cálculo de Viaje (Tab 4) y en la Edición
+  de Viaje (Tab 6).
+- NUEVO: Para rutas URBANAS (no frontera, no regional, no Aguachica, no
+  Riohacha) con Cliente = "AGOFER" (sin importar mayúsculas/espacios):
+    * VALOR DEL FLETE se autocalcula = Peso (kg) x 27.500 x Número de Viajes
+    * CARGUE/DESCARGUE - AMARRE/DESAMARRE se autocalcula = 30.000 x Número de Viajes
+    * La distancia recorrida real del día = Distancia de la Ruta x Número
+      de Viajes, y esa distancia (no la de la ruta sola) es la que se usa
+      para calcular Llantas, Aceite, Combustible/Galones, y la que queda
+      guardada en el historial (Trazabilidad) como "Distancia" del viaje.
+  Todos estos valores autocalculados SIGUEN SIENDO EDITABLES: se
+  precargan en el campo pero el usuario puede corregirlos a mano si un
+  viaje particular es distinto.
+- NUEVO: se guarda el campo "peso" en la base de datos (columna nueva en
+  viajes_v4), visible también en Trazabilidad.
 """
 
 import streamlit as st
@@ -124,6 +141,16 @@ def limpiar_numero(texto):
         return float(texto)
     except:
         return 0.0
+
+
+def es_cliente_agofer(cliente: str) -> bool:
+    """NUEVO v4.3: normaliza el nombre del cliente (mayúsculas, sin espacios
+    sobrantes) para detectar si corresponde al cliente 'AGOFER', sin
+    importar cómo lo haya escrito el usuario (mayúsculas/minúsculas,
+    espacios al inicio/final)."""
+    if not cliente:
+        return False
+    return str(cliente).strip().upper() == "AGOFER"
 
 
 # ==================== BASE DE DATOS SUPABASE ====================
@@ -232,6 +259,9 @@ class DatabaseManager:
             # --- MIGRACIÓN (v4.2): número de viajes del día (para la comisión urbana) ---
             cursor.execute("ALTER TABLE viajes_v4 ADD COLUMN IF NOT EXISTS numero_viajes INTEGER DEFAULT 1")
 
+            # --- MIGRACIÓN (v4.3): peso transportado (kg), usado en la fórmula de flete Agofer ---
+            cursor.execute("ALTER TABLE viajes_v4 ADD COLUMN IF NOT EXISTS peso REAL DEFAULT 0")
+
             # Tabla de tractomulas
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS tractomulas (
@@ -325,7 +355,13 @@ class DatabaseManager:
         """Guarda un viaje en la base de datos de forma segura con HORA COLOMBIA.
         fecha_viaje: fecha real en la que ocurrió el viaje (objeto date), distinta de
         fecha_creacion que es cuándo se registró en el sistema.
-        cliente: nombre del cliente/empresa para quien se hizo el flete (trazabilidad por cliente)."""
+        cliente: nombre del cliente/empresa para quien se hizo el flete (trazabilidad por cliente).
+
+        v4.3: la columna distancia_km ahora guarda la DISTANCIA EFECTIVA del
+        viaje (calculadora.distancia_efectiva), que para rutas urbanas del
+        cliente Agofer es distancia_ruta x numero_viajes; para los demás
+        casos es igual a la distancia de la ruta, como siempre. También se
+        guarda el peso (kg)."""
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -341,7 +377,7 @@ class DatabaseManager:
                 str(calculadora.conductor.nombre),
                 str(calculadora.ruta.origen),
                 str(calculadora.ruta.destino),
-                float(calculadora.ruta.distancia_km),
+                float(calculadora.distancia_efectiva),
                 int(calculadora.dias_viaje),
                 1 if calculadora.es_frontera else 0,
                 1 if calculadora.hubo_parqueo else 0,
@@ -381,6 +417,7 @@ class DatabaseManager:
                 fecha_viaje_str,
                 str(cliente),
                 int(calculadora.numero_viajes),
+                float(calculadora.peso),
             )
 
             sql_insert = '''
@@ -394,13 +431,13 @@ class DatabaseManager:
                     utilidad, rentabilidad, anticipo, saldo, hubo_anticipo_empresa,
                     ant_empresa, saldo_empresa, observaciones,
                     urea_acpm, transporte, propina_comision, fecha_viaje, cliente,
-                    numero_viajes
+                    numero_viajes, peso
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s
                 ) RETURNING id
             '''
 
@@ -477,7 +514,9 @@ class DatabaseManager:
 
     def actualizar_viaje(self, viaje_id, calculadora, fecha_viaje, observaciones="", cliente="", galones_reales=None):
         """Recalcula y actualiza un viaje ya guardado (edición desde Trazabilidad).
-        No modifica fecha_creacion (fecha de registro original)."""
+        No modifica fecha_creacion (fecha de registro original).
+        v4.3: distancia_km se actualiza con la distancia EFECTIVA (ver guardar_viaje)
+        y también se guarda el peso."""
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -498,12 +537,13 @@ class DatabaseManager:
                     utilidad = %s, rentabilidad = %s, anticipo = %s, saldo = %s,
                     hubo_anticipo_empresa = %s, ant_empresa = %s, saldo_empresa = %s,
                     observaciones = %s, urea_acpm = %s, transporte = %s, propina_comision = %s,
-                    fecha_viaje = %s, cliente = %s, galones_reales = %s, numero_viajes = %s
+                    fecha_viaje = %s, cliente = %s, galones_reales = %s, numero_viajes = %s,
+                    peso = %s
                 WHERE id = %s
             ''', (
                 str(calculadora.tractomula.placa), str(calculadora.conductor.nombre),
                 str(calculadora.ruta.origen), str(calculadora.ruta.destino),
-                float(calculadora.ruta.distancia_km), int(calculadora.dias_viaje),
+                float(calculadora.distancia_efectiva), int(calculadora.dias_viaje),
                 1 if calculadora.es_frontera else 0, 1 if calculadora.hubo_parqueo else 0,
                 costos['nomina_admin'], costos['nomina_conductor'], costos['comision_conductor'],
                 costos['mantenimiento'], costos['seguros'], costos['tecnomecanica'], costos['llantas'],
@@ -517,7 +557,7 @@ class DatabaseManager:
                 1 if calculadora.hubo_anticipo_empresa else 0, costos['ant_empresa'], costos['saldo_empresa'],
                 str(observaciones), float(calculadora.urea_acpm), float(calculadora.transporte),
                 float(calculadora.propina_comision), fecha_viaje_str, str(cliente), galones_reales_val,
-                int(calculadora.numero_viajes), viaje_id
+                int(calculadora.numero_viajes), float(calculadora.peso), viaje_id
             ))
             conn.commit()
             self.release_connection(conn)
@@ -1049,6 +1089,13 @@ class Ruta:
     default_cargue_descargue: float = 0.0
     default_otros: float = 0.0
 
+    @property
+    def es_urbana(self) -> bool:
+        """NUEVO v4.3: una ruta es 'urbana/normal' cuando no está marcada como
+        frontera, regional, Aguachica ni Riohacha. Es el mismo criterio que ya
+        usa la comisión del conductor urbano."""
+        return not (self.es_frontera or self.es_regional or self.es_aguachica or self.es_riohacha)
+
 
 # ==================== DATOS COLOMBIANOS ====================
 class DatosColombia:
@@ -1079,6 +1126,10 @@ class DatosColombia:
     MARGEN_ANT_EMPRESA = 0.90
     PUNTO_EQUILIBRIO_PORCENTAJE = 0.40   # ACTUALIZADO: antes era Total Gastos / 0.5
 
+    # --- NUEVO v4.3: constantes de la automatización cliente AGOFER / urbano ---
+    AGOFER_VALOR_POR_KG = 27500       # Flete = Peso (kg) x 27.500 x N° de Viajes
+    AGOFER_CARGUE_DESCARGUE = 30000   # Cargue/Descargue = 30.000 x N° de Viajes
+
 
 # ==================== ASIGNACION DE CONDUCTORES ====================
 PLACA_CONDUCTOR = {
@@ -1104,14 +1155,15 @@ PLACA_CONDUCTOR = {
 
 # ==================== CALCULADORA DE COSTOS ====================
 class CalculadoraCostos:
-    """Calcula todos los costos del viaje con fórmulas ACTUALIZADAS v4.2"""
+    """Calcula todos los costos del viaje con fórmulas ACTUALIZADAS v4.3"""
 
     def __init__(self, tractomula: Tractomula, conductor: Conductor, ruta: Ruta,
                  dias_viaje: int, numero_viajes: int, es_frontera: bool, hubo_parqueo: bool,
                  flypass: float, peajes: float, urea_acpm: float, hotel: float,
                  comida: float, transporte: float, propina_comision: float,
                  cargue_descargue: float, otros: float, valor_flete: float,
-                 anticipo: float, hubo_anticipo_empresa: bool, datos: DatosColombia):
+                 anticipo: float, hubo_anticipo_empresa: bool, datos: DatosColombia,
+                 peso: float = 0.0, cliente: str = ""):
         self.tractomula = tractomula
         self.conductor = conductor
         self.ruta = ruta
@@ -1132,6 +1184,34 @@ class CalculadoraCostos:
         self.anticipo = anticipo
         self.hubo_anticipo_empresa = hubo_anticipo_empresa
         self.datos = datos
+        self.peso = peso                      # NUEVO v4.3
+        self.cliente = cliente                # NUEVO v4.3
+
+    # ---------------- NUEVO v4.3: automatización cliente AGOFER / urbano ----------------
+    def aplica_formula_agofer(self) -> bool:
+        """La automatización (flete por peso, cargue/descargue y distancia real
+        recorrida) aplica cuando la ruta es URBANA (no frontera/regional/
+        Aguachica/Riohacha) Y el cliente es AGOFER."""
+        return self.ruta.es_urbana and not self.es_frontera and es_cliente_agofer(self.cliente)
+
+    @property
+    def distancia_efectiva(self) -> float:
+        """Distancia realmente recorrida en el día. Para viajes urbanos de
+        AGOFER = distancia de la ruta x número de viajes (ej. ruta de 39 km
+        con 3 viajes = 117 km). En cualquier otro caso, es la distancia de
+        la ruta tal cual (comportamiento de siempre)."""
+        if self.aplica_formula_agofer():
+            return self.ruta.distancia_km * self.numero_viajes
+        return self.ruta.distancia_km
+
+    def calcular_flete_sugerido_agofer(self) -> float:
+        """Flete sugerido = Peso (kg) x 27.500 x Número de Viajes.
+        Solo tiene sentido cuando aplica_formula_agofer() es True."""
+        return self.peso * self.datos.AGOFER_VALOR_POR_KG * self.numero_viajes
+
+    def calcular_cargue_descargue_sugerido_agofer(self) -> float:
+        """Cargue/Descargue - Amarre/Desamarre sugerido = 30.000 x Número de Viajes."""
+        return self.datos.AGOFER_CARGUE_DESCARGUE * self.numero_viajes
 
     def calcular_nomina_admin(self) -> float:
         return (self.datos.NOMINA_ADMIN_BASE / self.datos.NOMINA_ADMIN_DIVISOR) * self.dias_viaje
@@ -1173,17 +1253,22 @@ class CalculadoraCostos:
         return (self.datos.TECNOMECANICA_ANUAL / 365) * self.dias_viaje
 
     def calcular_llantas(self) -> float:
+        """ACTUALIZADO v4.3: usa la distancia EFECTIVA (ruta x número de
+        viajes para casos AGOFER urbano; distancia de la ruta en los demás
+        casos), para reflejar el desgaste real por los km recorridos."""
         costo_por_km = (self.datos.LLANTAS_COSTO * self.datos.LLANTAS_CANTIDAD) / self.datos.LLANTAS_KM
-        return costo_por_km * self.ruta.distancia_km
+        return costo_por_km * self.distancia_efectiva
 
     def calcular_aceite(self) -> float:
+        """ACTUALIZADO v4.3: usa la distancia EFECTIVA (ver calcular_llantas)."""
         costo_por_km = self.datos.ACEITE_COSTO / self.datos.ACEITE_KM
-        return costo_por_km * self.ruta.distancia_km
+        return costo_por_km * self.distancia_efectiva
 
     def calcular_galones_necesarios(self) -> float:
+        """ACTUALIZADO v4.3: usa la distancia EFECTIVA (ver calcular_llantas)."""
         if self.tractomula.consumo_km_galon <= 0:
             return 0.0
-        return self.ruta.distancia_km / self.tractomula.consumo_km_galon
+        return self.distancia_efectiva / self.tractomula.consumo_km_galon
 
     def calcular_combustible(self) -> float:
         galones = self.calcular_galones_necesarios()
@@ -1284,9 +1369,12 @@ class GeneradorReportes:
 INFORMACIÓN DEL VIAJE
 {'-'*70}
 Ruta: {calculadora.ruta.origen} → {calculadora.ruta.destino}
-Distancia: {formatear_numero(calculadora.ruta.distancia_km)} km
+Distancia de la ruta: {formatear_numero(calculadora.ruta.distancia_km)} km
+Distancia efectiva del día (ruta x N° viajes si aplica): {formatear_numero(calculadora.distancia_efectiva)} km
 Días del viaje: {calculadora.dias_viaje}
 Número de viajes: {calculadora.numero_viajes}
+Peso transportado: {formatear_numero(calculadora.peso)} kg
+Cliente: {calculadora.cliente or '-'}
 Galones necesarios: {formatear_decimal(costos['galones_necesarios'])} gal
 Es frontera: {'Sí' if calculadora.es_frontera else 'No'}
 Es regional: {'Sí' if calculadora.ruta.es_regional else 'No'}
@@ -1370,18 +1458,18 @@ Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         ws_resumen = wb.active
         ws_resumen.title = "Resumen General"
 
-        ws_resumen.merge_cells('A1:N1')
+        ws_resumen.merge_cells('A1:O1')
         cell = ws_resumen['A1']
         cell.value = "REPORTE DE COSTOS - TRANSPORTE DE CARGA COLOMBIA"
         cell.font = Font(size=14, bold=True, color="1F4E78")
         cell.alignment = Alignment(horizontal='center', vertical='center')
 
-        ws_resumen.merge_cells('A2:N2')
+        ws_resumen.merge_cells('A2:O2')
         ws_resumen['A2'] = f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         ws_resumen['A2'].alignment = Alignment(horizontal='center')
 
         row = 4
-        headers = ['Ruta', 'Placa', 'Conductor', 'Distancia (km)', 'Días', 'N° Viajes', 'Galones',
+        headers = ['Ruta', 'Placa', 'Conductor', 'Peso (kg)', 'Distancia (km)', 'Días', 'N° Viajes', 'Galones',
                    'Combustible', 'Total Gastos', 'Anticipo', 'Saldo', 'Valor Flete',
                    'Utilidad', 'Rentabilidad %']
 
@@ -1402,7 +1490,8 @@ Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                 ruta_str,
                 calc.tractomula.placa,
                 calc.conductor.nombre,
-                calc.ruta.distancia_km,
+                calc.peso,
+                calc.distancia_efectiva,
                 calc.dias_viaje,
                 calc.numero_viajes,
                 costos['galones_necesarios'],
@@ -1427,10 +1516,12 @@ Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                 elif col == 6:
                     cell.number_format = '#,##0'
                 elif col == 7:
+                    cell.number_format = '#,##0'
+                elif col == 8:
                     cell.number_format = '#,##0.00'
-                elif col >= 8 and col <= 13:
+                elif col >= 9 and col <= 14:
                     cell.number_format = '$#,##0'
-                elif col == 14:
+                elif col == 15:
                     cell.number_format = '#,##0.0"%"'
                 else:
                     cell.number_format = '#,##0'
@@ -1440,7 +1531,7 @@ Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         ws_resumen.column_dimensions['A'].width = 30
         ws_resumen.column_dimensions['B'].width = 12
         ws_resumen.column_dimensions['C'].width = 28
-        for col in ['D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N']:
+        for col in ['D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O']:
             ws_resumen.column_dimensions[col].width = 16
 
         for idx, calc in enumerate(calculadoras, start=1):
@@ -1452,7 +1543,7 @@ Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             ws['A1'].font = Font(size=14, bold=True, color="1F4E78")
             ws['A1'].alignment = Alignment(horizontal='center')
 
-            ws['A2'] = f"Días: {calc.dias_viaje}   |   Número de viajes: {calc.numero_viajes}"
+            ws['A2'] = f"Días: {calc.dias_viaje}   |   Número de viajes: {calc.numero_viajes}   |   Peso: {formatear_numero(calc.peso)} kg   |   Distancia efectiva: {formatear_numero(calc.distancia_efectiva)} km"
             ws['A2'].font = Font(italic=True, color="555555")
 
             row = 3
@@ -1634,7 +1725,7 @@ def main():
 
         st.divider()
         st.subheader("📊 Constantes del Negocio")
-        st.caption("Valores fijos según fórmulas ACTUALIZADAS v4.2")
+        st.caption("Valores fijos según fórmulas ACTUALIZADAS v4.3")
         st.info(f"""
 **Nóminas:**
 - Admin base: ${formatear_numero(datos.NOMINA_ADMIN_BASE)} / 14
@@ -1646,6 +1737,11 @@ def main():
 - Riohacha: ${formatear_numero(datos.COMISION_RIOACHA)}
 - Aguachica: ${formatear_numero(datos.COMISION_AGUACHICA)}
 - Frontera: ${formatear_numero(datos.COMISION_FRONTERA)}
+
+**Automatización Cliente AGOFER (rutas urbanas):**
+- Flete = Peso (kg) x ${formatear_numero(datos.AGOFER_VALOR_POR_KG)} x N° de Viajes
+- Cargue/Descargue = ${formatear_numero(datos.AGOFER_CARGUE_DESCARGUE)} x N° de Viajes
+- Distancia efectiva = Distancia de la Ruta x N° de Viajes
 
 **Otros:**
 - Tecnomecánica/año: ${formatear_numero(datos.TECNOMECANICA_ANUAL)}
@@ -1912,7 +2008,10 @@ def main():
                 if default_propina_comision > 0:
                     st.caption(f"💵 {formatear_numero(default_propina_comision)}")
 
-                default_cargue_descargue_texto = st.text_input("Cargue/Descargue-Amarre default (COP)", value="", placeholder="0")
+                default_cargue_descargue_texto = st.text_input(
+                    "Cargue/Descargue-Amarre default (COP)", value="", placeholder="0",
+                    help="Para rutas urbanas con Cliente = AGOFER, este valor se autocalcula (30.000 x N° Viajes) en el momento del viaje y no depende de este default."
+                )
                 default_cargue_descargue = limpiar_numero(default_cargue_descargue_texto)
                 if default_cargue_descargue > 0:
                     st.caption(f"💵 {formatear_numero(default_cargue_descargue)}")
@@ -2069,7 +2168,7 @@ def main():
                 numero_viajes = st.number_input(
                     "🚛 Número de viajes",
                     min_value=1, value=1, step=1, key="sel_numero_viajes",
-                    help="Cuántos viajes hizo el conductor este día. Solo afecta la Comisión Conductor Urbano/Normal: $120.000 x Número de Viajes. Las demás comisiones (Regional, Aguachica, Riohacha, Frontera) son fijas."
+                    help="Cuántos viajes hizo el conductor este día. Afecta la Comisión Conductor Urbano/Normal, y para el cliente AGOFER en rutas urbanas también afecta el Flete, el Cargue/Descargue y la distancia recorrida."
                 )
                 fecha_viaje = st.date_input(
                     "📅 Fecha del viaje",
@@ -2081,11 +2180,39 @@ def main():
                     "🏢 Cliente",
                     value="",
                     placeholder="Nombre de la empresa o persona que contrató el flete",
-                    help="Para poder buscar y ver la trazabilidad de todos los viajes hechos para este cliente",
+                    help="Para poder buscar y ver la trazabilidad de todos los viajes hechos para este cliente. Escribe 'AGOFER' para activar la automatización de Flete/Cargue-Descargue/Distancia en rutas urbanas.",
                     key="sel_cliente"
                 )
+                peso_texto = st.text_input(
+                    "⚖️ Peso transportado (kg)",
+                    value="",
+                    placeholder="Ejemplo: 30.000",
+                    help="Peso de la carga en kilogramos. Se usa para calcular automáticamente el Flete cuando el cliente es AGOFER en rutas urbanas (Flete = Peso x 27.500 x N° de Viajes).",
+                    key="sel_peso"
+                )
+                peso = limpiar_numero(peso_texto)
+                if peso > 0:
+                    st.caption(f"⚖️ {formatear_numero(peso)} kg")
 
-            st.caption("💡 Los campos de gastos variables abajo ya vienen precargados con los valores por defecto de esta ruta. Puedes editarlos si el viaje tuvo un valor distinto.")
+            # ---------------- NUEVO v4.3: bandera y valores sugeridos de la automatización AGOFER ----------------
+            aplica_agofer = ruta_obj.es_urbana and es_cliente_agofer(cliente_viaje)
+            flete_sugerido_agofer = peso * datos.AGOFER_VALOR_POR_KG * numero_viajes if aplica_agofer else 0.0
+            cargue_sugerido_agofer = datos.AGOFER_CARGUE_DESCARGUE * numero_viajes if aplica_agofer else 0.0
+            distancia_sugerida_agofer = ruta_obj.distancia_km * numero_viajes if aplica_agofer else ruta_obj.distancia_km
+
+            if aplica_agofer:
+                st.success(
+                    f"🤖 **Automatización AGOFER activa** (ruta urbana + cliente AGOFER): "
+                    f"Flete sugerido = ${formatear_numero(flete_sugerido_agofer)} "
+                    f"(Peso {formatear_numero(peso)} kg x ${formatear_numero(datos.AGOFER_VALOR_POR_KG)} x {numero_viajes} viaje(s)) · "
+                    f"Cargue/Descargue sugerido = ${formatear_numero(cargue_sugerido_agofer)} "
+                    f"(${formatear_numero(datos.AGOFER_CARGUE_DESCARGUE)} x {numero_viajes} viaje(s)) · "
+                    f"Distancia efectiva del día = {formatear_numero(distancia_sugerida_agofer)} km "
+                    f"({formatear_numero(ruta_obj.distancia_km)} km x {numero_viajes} viaje(s)). "
+                    f"Estos valores ya vienen precargados abajo y puedes editarlos si el viaje es distinto."
+                )
+
+            st.caption("💡 Los campos de gastos variables abajo ya vienen precargados con los valores por defecto de esta ruta (o con los calculados automáticamente para AGOFER). Puedes editarlos si el viaje tuvo un valor distinto.")
 
             with st.form(key="form_calculo"):
                 st.divider()
@@ -2138,7 +2265,15 @@ def main():
                     if propina_comision > 0:
                         st.caption(f"💵 {formatear_numero(propina_comision)}")
                 with col2:
-                    cargue_texto = st.text_input("Cargue/Descargue - Amarre/Desamarre (COP)", value=formatear_numero(ruta_obj.default_cargue_descargue) if ruta_obj.default_cargue_descargue > 0 else "", placeholder="0")
+                    # NUEVO v4.3: si aplica la automatización AGOFER, se precarga con el valor
+                    # calculado (30.000 x N° Viajes); si no, se comporta como siempre (default de la ruta).
+                    valor_default_cargue = cargue_sugerido_agofer if aplica_agofer else ruta_obj.default_cargue_descargue
+                    cargue_texto = st.text_input(
+                        "Cargue/Descargue - Amarre/Desamarre (COP)",
+                        value=formatear_numero(valor_default_cargue) if valor_default_cargue > 0 else "",
+                        placeholder="0",
+                        help="Para cliente AGOFER en rutas urbanas se autocalcula: 30.000 x Número de Viajes. Editable si el viaje es distinto."
+                    )
                     cargue_descargue = limpiar_numero(cargue_texto)
                     if cargue_descargue > 0:
                         st.caption(f"💵 {formatear_numero(cargue_descargue)}")
@@ -2160,11 +2295,14 @@ def main():
                 st.divider()
                 st.subheader("💰 Valor del Flete")
 
+                # NUEVO v4.3: si aplica la automatización AGOFER, se precarga con
+                # Peso x 27.500 x Número de Viajes. Sigue siendo editable.
+                valor_flete_default = flete_sugerido_agofer if aplica_agofer else 0.0
                 valor_flete_texto = st.text_input(
                     "💰 Valor del Flete Cobrado al Cliente (COP)",
-                    value="",
+                    value=formatear_numero(valor_flete_default) if valor_flete_default > 0 else "",
                     placeholder="Ejemplo: 5.000.000",
-                    help="¿Cuánto VAS A COBRAR o YA COBRASTE por este viaje?"
+                    help="¿Cuánto VAS A COBRAR o YA COBRASTE por este viaje? Para cliente AGOFER en rutas urbanas se autocalcula: Peso x 27.500 x N° de Viajes. Editable si el viaje es distinto."
                 )
                 valor_flete = limpiar_numero(valor_flete_texto)
 
@@ -2177,7 +2315,8 @@ def main():
                         dias_viaje, numero_viajes, es_frontera, hubo_parqueo,
                         flypass, peajes, urea_acpm, hotel, comida, transporte,
                         propina_comision, cargue_descargue, otros,
-                        valor_flete, anticipo, hubo_anticipo_empresa, datos
+                        valor_flete, anticipo, hubo_anticipo_empresa, datos,
+                        peso=peso, cliente=cliente_viaje
                     )
                     costos_preview = calc_preview.calcular_costos_totales()
 
@@ -2194,7 +2333,8 @@ def main():
                         st.metric("Punto Equilibrio (40% Flete)", f"${formatear_numero(costos_preview['punto_equilibrio'])}")
 
                     st.info(f"🚛 **Comisión Conductor calculada:** ${formatear_numero(costos_preview['comision_conductor'])} "
-                            f"(según la ruta: fija, o $120.000 x {numero_viajes} viaje(s) si es urbana)")
+                            f"(según la ruta: fija, o $120.000 x {numero_viajes} viaje(s) si es urbana) · "
+                            f"**Distancia efectiva usada en combustible/llantas/aceite:** {formatear_numero(calc_preview.distancia_efectiva)} km")
 
                 observaciones = st.text_area("Observaciones (opcional)", placeholder="Notas sobre este viaje...")
 
@@ -2213,7 +2353,8 @@ def main():
                             dias_viaje, numero_viajes, es_frontera, hubo_parqueo,
                             flypass, peajes, urea_acpm, hotel, comida, transporte,
                             propina_comision, cargue_descargue, otros,
-                            valor_flete, anticipo, hubo_anticipo_empresa, datos
+                            valor_flete, anticipo, hubo_anticipo_empresa, datos,
+                            peso=peso, cliente=cliente_viaje
                         )
                         st.session_state.calculadoras.append(calculadora)
 
@@ -2228,6 +2369,8 @@ def main():
 
                                     - Fecha del Viaje: {fecha_viaje.strftime('%Y-%m-%d')}
                                     - Número de Viajes: {numero_viajes}
+                                    - Peso: {formatear_numero(peso)} kg
+                                    - Distancia efectiva: {formatear_numero(calculadora.distancia_efectiva)} km
                                     - Total Gastos: ${formatear_numero(costos['total_gastos'])}
                                     - Valor Flete: ${formatear_numero(calculadora.valor_flete)}
                                     - **Utilidad: ${formatear_numero(utilidad)}**
@@ -2240,6 +2383,8 @@ def main():
 
                                     - Fecha del Viaje: {fecha_viaje.strftime('%Y-%m-%d')}
                                     - Número de Viajes: {numero_viajes}
+                                    - Peso: {formatear_numero(peso)} kg
+                                    - Distancia efectiva: {formatear_numero(calculadora.distancia_efectiva)} km
                                     - Total Gastos: ${formatear_numero(costos['total_gastos'])}
                                     - Valor Flete: ${formatear_numero(calculadora.valor_flete)}
                                     - **Pérdida: ${formatear_numero(utilidad)}**
@@ -2337,14 +2482,14 @@ def main():
 
             columnas_mostrar = [
                 'id', 'fecha_viaje', 'fecha_creacion', 'placa', 'conductor', 'origen', 'destino',
-                'cliente', 'distancia_km', 'dias_viaje', 'numero_viajes', 'total_gastos', 'valor_flete',
+                'cliente', 'peso', 'distancia_km', 'dias_viaje', 'numero_viajes', 'total_gastos', 'valor_flete',
                 'utilidad', 'rentabilidad'
             ]
 
             df_mostrar = df_viajes[columnas_mostrar].copy()
             df_mostrar.columns = [
                 'ID', 'Fecha del Viaje', 'Fecha Registro', 'Placa', 'Conductor', 'Origen', 'Destino',
-                'Cliente', 'Km', 'Días', 'N° Viajes', 'Total Gastos', 'Valor Flete', 'Utilidad', 'Rentabilidad %'
+                'Cliente', 'Peso (kg)', 'Km', 'Días', 'N° Viajes', 'Total Gastos', 'Valor Flete', 'Utilidad', 'Rentabilidad %'
             ]
 
             df_mostrar['Total Gastos'] = df_mostrar['Total Gastos'].apply(lambda x: f"${formatear_numero(x)}")
@@ -2390,10 +2535,14 @@ def main():
                             pass
                         st.write(f"**Conductor:** {viaje[3]}")
                         st.write(f"**Ruta:** {viaje[4]} → {viaje[5]}")
-                        st.write(f"**Distancia:** {formatear_numero(viaje[6])} km")
+                        st.write(f"**Distancia (efectiva del día):** {formatear_numero(viaje[6])} km")
                         st.write(f"**Días:** {viaje[7]}")
                         try:
                             st.write(f"**🚛 Número de Viajes:** {viaje[46] if viaje[46] else 1}")
+                        except IndexError:
+                            pass
+                        try:
+                            st.write(f"**⚖️ Peso:** {formatear_numero(viaje[47]) if len(viaje) > 47 and viaje[47] else 0} kg")
                         except IndexError:
                             pass
                         st.write(f"**Es Frontera:** {'Sí' if viaje[8] else 'No'}")
@@ -2491,77 +2640,123 @@ def main():
                         if not placas_disponibles or not conductores_disponibles or not rutas_disponibles:
                             st.error("⚠️ No se puede editar: faltan tractomulas, conductores o rutas registradas actualmente.")
                         else:
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                edit_placa = st.selectbox("Tractomula", placas_disponibles, index=idx_placa, key="edit_placa")
-                                edit_conductor = st.selectbox("Conductor", conductores_disponibles, index=idx_conductor, key="edit_conductor")
-                                edit_ruta_str = st.selectbox("Ruta", rutas_disponibles, index=idx_ruta, key="edit_ruta")
-                                edit_dias = st.number_input("Días del viaje", min_value=1, value=int(viaje[7]), step=1, key="edit_dias")
-                                edit_numero_viajes = st.number_input(
-                                    "🚛 Número de viajes", min_value=1,
-                                    value=int(viaje[46]) if len(viaje) > 46 and viaje[46] else 1,
-                                    step=1, key="edit_numero_viajes",
-                                    help="Afecta la Comisión Conductor Urbano/Normal: $120.000 x Número de Viajes"
-                                )
-                                edit_fecha_viaje = st.date_input(
-                                    "📅 Fecha del viaje",
-                                    value=viaje[43] if len(viaje) > 43 and viaje[43] else datetime.now().date(),
-                                    key="edit_fecha_viaje"
-                                )
-                            with col2:
-                                edit_es_frontera = st.checkbox("¿Es viaje a frontera?", value=bool(viaje[8]), key="edit_frontera")
-                                edit_hubo_parqueo = st.checkbox("¿Hubo parqueo?", value=bool(viaje[9]), key="edit_parqueo")
-                                edit_hubo_ant_empresa = st.checkbox("¿Hubo anticipo empresa?", value=bool(viaje[36]), key="edit_ant_empresa")
-
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                edit_flypass_texto = st.text_input("Flypass (COP)", value=formatear_numero(viaje[20]) if viaje[20] else "", key="edit_flypass")
-                                edit_flypass = limpiar_numero(edit_flypass_texto)
-                                edit_peajes_texto = st.text_input("Peajes (COP)", value=formatear_numero(viaje[21]) if viaje[21] else "", key="edit_peajes")
-                                edit_peajes = limpiar_numero(edit_peajes_texto)
-                                edit_urea_texto = st.text_input("Urea y/o ACPM (COP)", value=formatear_numero(viaje[40]) if len(viaje) > 40 and viaje[40] else "", key="edit_urea")
-                                edit_urea = limpiar_numero(edit_urea_texto)
-                            with col2:
-                                edit_hotel_texto = st.text_input("Hotel (COP)", value=formatear_numero(viaje[23]) if viaje[23] else "", key="edit_hotel")
-                                edit_hotel = limpiar_numero(edit_hotel_texto)
-                                edit_comida_texto = st.text_input("Comida (COP)", value=formatear_numero(viaje[24]) if viaje[24] else "", key="edit_comida")
-                                edit_comida = limpiar_numero(edit_comida_texto)
-                                edit_transporte_texto = st.text_input("Transporte (COP)", value=formatear_numero(viaje[41]) if len(viaje) > 41 and viaje[41] else "", key="edit_transporte")
-                                edit_transporte = limpiar_numero(edit_transporte_texto)
-                            with col3:
-                                edit_propina_texto = st.text_input("Propina/Comisión (COP)", value=formatear_numero(viaje[42]) if len(viaje) > 42 and viaje[42] else "", key="edit_propina")
-                                edit_propina = limpiar_numero(edit_propina_texto)
-                                edit_cargue_texto = st.text_input("Cargue/Descargue (COP)", value=formatear_numero(viaje[26]) if viaje[26] else "", key="edit_cargue")
-                                edit_cargue = limpiar_numero(edit_cargue_texto)
-                                edit_otros_texto = st.text_input("Otros (COP)", value=formatear_numero(viaje[27]) if viaje[27] else "", key="edit_otros")
-                                edit_otros = limpiar_numero(edit_otros_texto)
-
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                edit_valor_flete_texto = st.text_input("Valor del Flete (COP)", value=formatear_numero(viaje[31]) if viaje[31] else "", key="edit_flete")
-                                edit_valor_flete = limpiar_numero(edit_valor_flete_texto)
-                            with col2:
-                                edit_anticipo_texto = st.text_input("Anticipo (COP)", value=formatear_numero(viaje[34]) if viaje[34] else "", key="edit_anticipo")
-                                edit_anticipo = limpiar_numero(edit_anticipo_texto)
-
-                            edit_cliente = st.text_input(
-                                "🏢 Cliente", value=(viaje[44] if len(viaje) > 44 and viaje[44] else ""), key="edit_cliente"
+                            # Cliente y Número de Viajes se leen fuera del form de edición para poder
+                            # recalcular en vivo los valores sugeridos de AGOFER (igual que en Tab 4).
+                            edit_ruta_str_preview = st.selectbox("Ruta", rutas_disponibles, index=idx_ruta, key="edit_ruta_preview")
+                            edit_ruta_obj_preview = next(r for r in st.session_state.rutas if f"{r.origen} → {r.destino}" == edit_ruta_str_preview)
+                            edit_numero_viajes_preview = st.number_input(
+                                "🚛 Número de viajes", min_value=1,
+                                value=int(viaje[46]) if len(viaje) > 46 and viaje[46] else 1,
+                                step=1, key="edit_numero_viajes_preview",
+                                help="Afecta la Comisión Conductor Urbano/Normal, y para AGOFER en rutas urbanas también el Flete, Cargue/Descargue y la distancia."
                             )
-                            edit_observaciones = st.text_area("Observaciones", value=viaje[39] if viaje[39] else "", key="edit_obs")
+                            edit_cliente_preview = st.text_input(
+                                "🏢 Cliente", value=(viaje[44] if len(viaje) > 44 and viaje[44] else ""), key="edit_cliente_preview"
+                            )
+                            edit_peso_preview_texto = st.text_input(
+                                "⚖️ Peso transportado (kg)",
+                                value=formatear_numero(viaje[47]) if len(viaje) > 47 and viaje[47] else "",
+                                key="edit_peso_preview"
+                            )
+                            edit_peso_preview = limpiar_numero(edit_peso_preview_texto)
 
-                            col_guardar, col_cancelar = st.columns(2)
-                            with col_guardar:
-                                if st.button("💾 Guardar Cambios", type="primary", key="guardar_edicion"):
+                            edit_aplica_agofer = edit_ruta_obj_preview.es_urbana and es_cliente_agofer(edit_cliente_preview)
+                            edit_flete_sugerido = edit_peso_preview * datos.AGOFER_VALOR_POR_KG * edit_numero_viajes_preview if edit_aplica_agofer else 0.0
+                            edit_cargue_sugerido = datos.AGOFER_CARGUE_DESCARGUE * edit_numero_viajes_preview if edit_aplica_agofer else 0.0
+
+                            if edit_aplica_agofer:
+                                st.success(
+                                    f"🤖 Automatización AGOFER activa: Flete sugerido ${formatear_numero(edit_flete_sugerido)} · "
+                                    f"Cargue/Descargue sugerido ${formatear_numero(edit_cargue_sugerido)} · "
+                                    f"Distancia efectiva sugerida {formatear_numero(edit_ruta_obj_preview.distancia_km * edit_numero_viajes_preview)} km"
+                                )
+
+                            with st.form(key="form_editar_viaje"):
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    edit_placa = st.selectbox("Tractomula", placas_disponibles, index=idx_placa, key="edit_placa")
+                                    edit_conductor = st.selectbox("Conductor", conductores_disponibles, index=idx_conductor, key="edit_conductor")
+                                    edit_dias = st.number_input("Días del viaje", min_value=1, value=int(viaje[7]), step=1, key="edit_dias")
+                                    edit_fecha_viaje = st.date_input(
+                                        "📅 Fecha del viaje",
+                                        value=viaje[43] if len(viaje) > 43 and viaje[43] else datetime.now().date(),
+                                        key="edit_fecha_viaje"
+                                    )
+                                with col2:
+                                    edit_es_frontera = st.checkbox("¿Es viaje a frontera?", value=bool(viaje[8]), key="edit_frontera")
+                                    edit_hubo_parqueo = st.checkbox("¿Hubo parqueo?", value=bool(viaje[9]), key="edit_parqueo")
+                                    edit_hubo_ant_empresa = st.checkbox("¿Hubo anticipo empresa?", value=bool(viaje[36]), key="edit_ant_empresa")
+
+                                col1, col2, col3 = st.columns(3)
+                                with col1:
+                                    edit_flypass_texto = st.text_input("Flypass (COP)", value=formatear_numero(viaje[20]) if viaje[20] else "", key="edit_flypass")
+                                    edit_flypass = limpiar_numero(edit_flypass_texto)
+                                    edit_peajes_texto = st.text_input("Peajes (COP)", value=formatear_numero(viaje[21]) if viaje[21] else "", key="edit_peajes")
+                                    edit_peajes = limpiar_numero(edit_peajes_texto)
+                                    edit_urea_texto = st.text_input("Urea y/o ACPM (COP)", value=formatear_numero(viaje[40]) if len(viaje) > 40 and viaje[40] else "", key="edit_urea")
+                                    edit_urea = limpiar_numero(edit_urea_texto)
+                                with col2:
+                                    edit_hotel_texto = st.text_input("Hotel (COP)", value=formatear_numero(viaje[23]) if viaje[23] else "", key="edit_hotel")
+                                    edit_hotel = limpiar_numero(edit_hotel_texto)
+                                    edit_comida_texto = st.text_input("Comida (COP)", value=formatear_numero(viaje[24]) if viaje[24] else "", key="edit_comida")
+                                    edit_comida = limpiar_numero(edit_comida_texto)
+                                    edit_transporte_texto = st.text_input("Transporte (COP)", value=formatear_numero(viaje[41]) if len(viaje) > 41 and viaje[41] else "", key="edit_transporte")
+                                    edit_transporte = limpiar_numero(edit_transporte_texto)
+                                with col3:
+                                    edit_propina_texto = st.text_input("Propina/Comisión (COP)", value=formatear_numero(viaje[42]) if len(viaje) > 42 and viaje[42] else "", key="edit_propina")
+                                    edit_propina = limpiar_numero(edit_propina_texto)
+                                    # NUEVO v4.3: precarga con el valor sugerido AGOFER si aplica; si no, con el valor ya guardado.
+                                    valor_default_cargue_edit = edit_cargue_sugerido if edit_aplica_agofer else (viaje[26] or 0)
+                                    edit_cargue_texto = st.text_input(
+                                        "Cargue/Descargue (COP)",
+                                        value=formatear_numero(valor_default_cargue_edit) if valor_default_cargue_edit else "",
+                                        key="edit_cargue",
+                                        help="Autocalculado para AGOFER en rutas urbanas: 30.000 x N° de Viajes. Editable."
+                                    )
+                                    edit_cargue = limpiar_numero(edit_cargue_texto)
+                                    edit_otros_texto = st.text_input("Otros (COP)", value=formatear_numero(viaje[27]) if viaje[27] else "", key="edit_otros")
+                                    edit_otros = limpiar_numero(edit_otros_texto)
+
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    # NUEVO v4.3: precarga con el valor sugerido AGOFER si aplica.
+                                    valor_default_flete_edit = edit_flete_sugerido if edit_aplica_agofer else (viaje[31] or 0)
+                                    edit_valor_flete_texto = st.text_input(
+                                        "Valor del Flete (COP)",
+                                        value=formatear_numero(valor_default_flete_edit) if valor_default_flete_edit else "",
+                                        key="edit_flete",
+                                        help="Autocalculado para AGOFER en rutas urbanas: Peso x 27.500 x N° de Viajes. Editable."
+                                    )
+                                    edit_valor_flete = limpiar_numero(edit_valor_flete_texto)
+                                with col2:
+                                    edit_anticipo_texto = st.text_input("Anticipo (COP)", value=formatear_numero(viaje[34]) if viaje[34] else "", key="edit_anticipo")
+                                    edit_anticipo = limpiar_numero(edit_anticipo_texto)
+
+                                edit_observaciones = st.text_area("Observaciones", value=viaje[39] if viaje[39] else "", key="edit_obs")
+
+                                col_guardar, col_cancelar = st.columns(2)
+                                with col_guardar:
+                                    guardar_edicion = st.form_submit_button("💾 Guardar Cambios", type="primary")
+                                with col_cancelar:
+                                    cancelar_edicion = st.form_submit_button("✖️ Cancelar Edición")
+
+                                if guardar_edicion:
                                     edit_tractomula_obj = next(t for t in st.session_state.tractomulas if t.placa == edit_placa)
                                     edit_conductor_obj = next(c for c in st.session_state.conductores if c.nombre == edit_conductor)
-                                    edit_ruta_obj = next(r for r in st.session_state.rutas if f"{r.origen} → {r.destino}" == edit_ruta_str)
+                                    # Se usan la ruta, número de viajes, cliente y peso capturados arriba (fuera del form),
+                                    # que son los que ya alimentaron los valores sugeridos de AGOFER.
+                                    edit_ruta_obj = edit_ruta_obj_preview
+                                    edit_numero_viajes = edit_numero_viajes_preview
+                                    edit_cliente = edit_cliente_preview
+                                    edit_peso = edit_peso_preview
 
                                     calculadora_editada = CalculadoraCostos(
                                         edit_tractomula_obj, edit_conductor_obj, edit_ruta_obj,
                                         edit_dias, edit_numero_viajes, edit_es_frontera, edit_hubo_parqueo,
                                         edit_flypass, edit_peajes, edit_urea, edit_hotel, edit_comida,
                                         edit_transporte, edit_propina, edit_cargue, edit_otros,
-                                        edit_valor_flete, edit_anticipo, edit_hubo_ant_empresa, datos
+                                        edit_valor_flete, edit_anticipo, edit_hubo_ant_empresa, datos,
+                                        peso=edit_peso, cliente=edit_cliente
                                     )
                                     exito = db.actualizar_viaje(viaje_id_seleccionado, calculadora_editada, edit_fecha_viaje, edit_observaciones, edit_cliente)
                                     if exito:
@@ -2570,8 +2765,7 @@ def main():
                                         if 'ultima_busqueda' in st.session_state:
                                             del st.session_state.ultima_busqueda
                                         st.rerun()
-                            with col_cancelar:
-                                if st.button("✖️ Cancelar Edición", key="cancelar_edicion"):
+                                if cancelar_edicion:
                                     del st.session_state.editando_viaje_id
                                     st.rerun()
 
