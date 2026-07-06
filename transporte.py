@@ -17,12 +17,32 @@ CAMBIOS EN ESTA VERSIÓN (v4.0):
 - CORREGIDO: bug de diciembre en filtro de fechas (Tab 7)
 - CORREGIDO: guardar_ruta ahora sí devuelve el ID (usa RETURNING id)
 - CORREGIDO: se eliminaron las 3 definiciones duplicadas de obtener_rutas()
+
+CAMBIOS EN ESTA VERSIÓN (v4.1 - OPTIMIZACIÓN DE RENDIMIENTO):
+- NUEVO: Pool de conexiones (psycopg2.pool) cacheado con st.cache_resource,
+  en vez de abrir/cerrar una conexión nueva a Supabase en cada consulta.
+  Esto reduce drásticamente la latencia de guardar/consultar/filtrar.
+- NUEVO: init_database() ya no se re-ejecuta en cada sesión/usuario (se
+  controla con una bandera global a nivel de proceso).
+- NUEVO: se eliminó la consulta duplicada a la tabla `rutas` en el Tab 2.
+- NUEVO: cache de 20-30s para las consultas pesadas del Dashboard y de
+  Totales por Flota, para no recalcularlas en cada rerun de Streamlit.
+- RECOMENDADO (ejecutar una sola vez en el SQL Editor de Supabase):
+    CREATE INDEX IF NOT EXISTS idx_viajes_fecha_viaje ON viajes_v4 (fecha_viaje);
+    CREATE INDEX IF NOT EXISTS idx_viajes_placa ON viajes_v4 (placa);
+    CREATE INDEX IF NOT EXISTS idx_viajes_conductor ON viajes_v4 (conductor);
+    CREATE EXTENSION IF NOT EXISTS pg_trgm;
+    CREATE INDEX IF NOT EXISTS idx_viajes_conductor_trgm ON viajes_v4 USING gin (conductor gin_trgm_ops);
+    CREATE INDEX IF NOT EXISTS idx_viajes_origen_trgm ON viajes_v4 USING gin (origen gin_trgm_ops);
+    CREATE INDEX IF NOT EXISTS idx_viajes_destino_trgm ON viajes_v4 USING gin (destino gin_trgm_ops);
+    CREATE INDEX IF NOT EXISTS idx_viajes_cliente_trgm ON viajes_v4 USING gin (cliente gin_trgm_ops);
 """
 
 import streamlit as st
 import re
 import psycopg2
 from psycopg2 import sql
+from psycopg2 import pool as pg_pool
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from typing import List, Dict
@@ -45,6 +65,20 @@ except:
 
 # ==================== CONFIGURACIÓN SUPABASE ====================
 SUPABASE_DB_URL = "postgresql://postgres.wiomyjrmsrhcgvhgkbqe:Conejito800$@aws-1-us-west-2.pooler.supabase.com:6543/postgres"
+
+
+# ==================== POOL DE CONEXIONES (NUEVO v4.1) ====================
+# Se cachea a nivel de proceso con st.cache_resource: todas las sesiones de
+# Streamlit reutilizan el mismo pool de conexiones ya abiertas, en vez de
+# abrir/cerrar una conexión TCP+TLS nueva contra Supabase en cada consulta.
+@st.cache_resource
+def get_db_pool():
+    return pg_pool.ThreadedConnectionPool(1, 10, SUPABASE_DB_URL)
+
+
+# Bandera global (a nivel de proceso) para no re-correr las migraciones
+# ALTER TABLE / CREATE TABLE en cada usuario/sesión nueva.
+_db_initialized = False
 
 
 # ==================== FUNCIONES DE FORMATO ====================
@@ -85,17 +119,38 @@ def limpiar_numero(texto):
 
 # ==================== BASE DE DATOS SUPABASE ====================
 class DatabaseManager:
-    """Gestor de base de datos Supabase (PostgreSQL) para trazabilidad"""
+    """Gestor de base de datos Supabase (PostgreSQL) para trazabilidad.
+
+    v4.1: usa un pool de conexiones cacheado (get_db_pool) en vez de abrir
+    una conexión nueva en cada método. get_connection() toma una conexión
+    prestada del pool y release_connection() la devuelve para que se
+    reutilice en la siguiente consulta."""
 
     def __init__(self):
-        self.db_url = SUPABASE_DB_URL
+        self.pool = get_db_pool()
         self.init_database()
 
     def get_connection(self):
-        return psycopg2.connect(self.db_url)
+        return self.pool.getconn()
+
+    def release_connection(self, conn):
+        """Devuelve la conexión al pool en vez de cerrarla, para que se
+        reutilice en la siguiente consulta."""
+        try:
+            self.pool.putconn(conn)
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def init_database(self):
-        """Crea las tablas si no existen y migra columnas nuevas (Sintaxis PostgreSQL)"""
+        """Crea las tablas si no existen y migra columnas nuevas (Sintaxis PostgreSQL).
+        v4.1: solo se ejecuta una vez por proceso (bandera _db_initialized),
+        para no repetir ~20 ALTER TABLE en cada sesión de usuario nueva."""
+        global _db_initialized
+        if _db_initialized:
+            return
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -249,7 +304,8 @@ class DatabaseManager:
             ''')
 
             conn.commit()
-            conn.close()
+            self.release_connection(conn)
+            _db_initialized = True
         except Exception as e:
             st.error(f"Error inicializando base de datos: {e}")
 
@@ -344,7 +400,7 @@ class DatabaseManager:
                 st.warning("El viaje se guardó pero no se pudo recuperar el ID.")
 
             conn.commit()
-            conn.close()
+            self.release_connection(conn)
             return viaje_id
 
         except Exception as e:
@@ -355,7 +411,7 @@ class DatabaseManager:
         conn = self.get_connection()
         query = "SELECT * FROM viajes_v4 ORDER BY fecha_creacion DESC"
         df = pd.read_sql_query(query, conn)
-        conn.close()
+        self.release_connection(conn)
         return df
 
     def buscar_viajes(self, fecha_inicio=None, fecha_fin=None, placa=None, conductor=None, origen=None, destino=None, cliente=None):
@@ -387,7 +443,7 @@ class DatabaseManager:
             params.append(f"%{cliente}%")
         query += " ORDER BY fecha_creacion DESC"
         df = pd.read_sql_query(query, conn, params=params)
-        conn.close()
+        self.release_connection(conn)
         return df
 
     def obtener_viaje_por_id(self, viaje_id):
@@ -395,7 +451,7 @@ class DatabaseManager:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM viajes_v4 WHERE id = %s", (viaje_id,))
         viaje = cursor.fetchone()
-        conn.close()
+        self.release_connection(conn)
         return viaje
 
     def eliminar_viaje(self, viaje_id):
@@ -403,7 +459,7 @@ class DatabaseManager:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM viajes_v4 WHERE id = %s", (viaje_id,))
         conn.commit()
-        conn.close()
+        self.release_connection(conn)
 
     def actualizar_viaje(self, viaje_id, calculadora, fecha_viaje, observaciones="", cliente="", galones_reales=None):
         """Recalcula y actualiza un viaje ya guardado (edición desde Trazabilidad).
@@ -449,7 +505,7 @@ class DatabaseManager:
                 float(calculadora.propina_comision), fecha_viaje_str, str(cliente), galones_reales_val, viaje_id
             ))
             conn.commit()
-            conn.close()
+            self.release_connection(conn)
             return True
         except Exception as e:
             st.error(f"❌ Error al actualizar el viaje: {e}")
@@ -471,7 +527,7 @@ class DatabaseManager:
             params.append(placa)
         query += " ORDER BY fecha_viaje DESC"
         df = pd.read_sql_query(query, conn, params=params)
-        conn.close()
+        self.release_connection(conn)
         if not df.empty:
             df['diferencia_galones'] = df['galones_reales'] - df['galones_necesarios']
             df['porcentaje_sobreconsumo'] = (
@@ -498,7 +554,7 @@ class DatabaseManager:
             stats['rutas_frecuentes'] = cursor.fetchall()
         except Exception:
             stats = {'total_viajes': 0, 'total_km': 0, 'total_gastos': 0, 'viajes_por_placa': [], 'viajes_por_conductor': [], 'rutas_frecuentes': []}
-        conn.close()
+        self.release_connection(conn)
         return stats
 
     def obtener_dashboard_data(self):
@@ -590,7 +646,7 @@ class DatabaseManager:
             data['evolucion_6_meses'] = []
             data['viajes_no_rentables'] = []
 
-        conn.close()
+        self.release_connection(conn)
         return data
 
     def obtener_totales_por_placa(self, fecha_inicio=None, fecha_fin=None):
@@ -646,7 +702,7 @@ class DatabaseManager:
         except Exception:
             df = pd.DataFrame()
 
-        conn.close()
+        self.release_connection(conn)
         return df
 
     # Métodos para tractomulas
@@ -663,7 +719,7 @@ class DatabaseManager:
         except Exception:
             return False
         finally:
-            conn.close()
+            self.release_connection(conn)
 
     def obtener_tractomulas(self):
         conn = self.get_connection()
@@ -676,7 +732,7 @@ class DatabaseManager:
                 consumo_km_galon=row[2],
                 tipo=row[3]
             ))
-        conn.close()
+        self.release_connection(conn)
         return tractomulas
 
     def eliminar_tractomula(self, placa):
@@ -684,7 +740,7 @@ class DatabaseManager:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM tractomulas WHERE placa = %s", (placa,))
         conn.commit()
-        conn.close()
+        self.release_connection(conn)
 
     # Métodos para conductores
     def guardar_conductor(self, conductor):
@@ -700,7 +756,7 @@ class DatabaseManager:
         except Exception:
             return False
         finally:
-            conn.close()
+            self.release_connection(conn)
 
     def obtener_conductores(self):
         conn = self.get_connection()
@@ -709,7 +765,7 @@ class DatabaseManager:
         conductores = []
         for row in cursor.fetchall():
             conductores.append(Conductor(nombre=row[1], cedula=row[2]))
-        conn.close()
+        self.release_connection(conn)
         return conductores
 
     def eliminar_conductor(self, nombre):
@@ -717,7 +773,7 @@ class DatabaseManager:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM conductores WHERE nombre = %s", (nombre,))
         conn.commit()
-        conn.close()
+        self.release_connection(conn)
 
     # ---------------- Métodos para rutas (CORREGIDOS) ----------------
     def guardar_ruta(self, ruta):
@@ -755,7 +811,7 @@ class DatabaseManager:
         result = cursor.fetchone()
         ruta_id = result[0] if result else None
         conn.commit()
-        conn.close()
+        self.release_connection(conn)
         return ruta_id
 
     def obtener_rutas(self):
@@ -793,15 +849,30 @@ class DatabaseManager:
                 default_cargue_descargue=row[15] or 0.0,
                 default_otros=row[16] or 0.0,
             ))
-        conn.close()
+        self.release_connection(conn)
         return rutas
+
+    def obtener_rutas_con_id(self):
+        """NUEVO v4.1: trae (id, origen, destino, distancia_km, es_frontera, es_regional,
+        es_aguachica, es_riohacha) en una sola consulta, para no tener que volver a pegarle
+        a la tabla `rutas` en el Tab 2 solo para mostrar la lista con botón de eliminar."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica, es_riohacha
+            FROM rutas
+            ORDER BY origen, destino
+        """)
+        rutas_con_id = cursor.fetchall()
+        self.release_connection(conn)
+        return rutas_con_id
 
     def eliminar_ruta(self, ruta_id):
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("DELETE FROM rutas WHERE id = %s", (ruta_id,))
         conn.commit()
-        conn.close()
+        self.release_connection(conn)
 
     # ---------------- Métodos para Liquidaciones de Conductores ----------------
     def obtener_viajes_para_liquidar(self, conductor, periodo_inicio, periodo_fin):
@@ -814,7 +885,7 @@ class DatabaseManager:
             ORDER BY fecha_viaje
         """
         df = pd.read_sql_query(query, conn, params=[conductor, periodo_inicio, periodo_fin])
-        conn.close()
+        self.release_connection(conn)
         return df
 
     def guardar_liquidacion(self, conductor, periodo_inicio, periodo_fin, df_viajes, observaciones=""):
@@ -845,7 +916,7 @@ class DatabaseManager:
         result = cursor.fetchone()
         liquidacion_id = result[0] if result else None
         conn.commit()
-        conn.close()
+        self.release_connection(conn)
         return liquidacion_id, cantidad_viajes, placas, total_comisiones, total_a_pagar
 
     def obtener_liquidaciones(self, conductor=None, estado=None):
@@ -860,7 +931,7 @@ class DatabaseManager:
             params.append(estado)
         query += " ORDER BY periodo_inicio DESC"
         df = pd.read_sql_query(query, conn, params=params)
-        conn.close()
+        self.release_connection(conn)
         return df
 
     def marcar_liquidacion_pagada(self, liquidacion_id):
@@ -870,14 +941,14 @@ class DatabaseManager:
         cursor.execute("UPDATE liquidaciones_conductor SET estado = 'Pagada', fecha_pago = %s WHERE id = %s",
                        (hoy, liquidacion_id))
         conn.commit()
-        conn.close()
+        self.release_connection(conn)
 
     def eliminar_liquidacion(self, liquidacion_id):
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("DELETE FROM liquidaciones_conductor WHERE id = %s", (liquidacion_id,))
         conn.commit()
-        conn.close()
+        self.release_connection(conn)
 
     # ---------------- Métodos para Cuentas por Pagar/Cobrar ----------------
     def guardar_cuenta(self, tipo, concepto, tercero, monto, fecha_vencimiento, observaciones="", viaje_id=None):
@@ -894,7 +965,7 @@ class DatabaseManager:
         result = cursor.fetchone()
         cuenta_id = result[0] if result else None
         conn.commit()
-        conn.close()
+        self.release_connection(conn)
         return cuenta_id
 
     def obtener_cuentas(self, tipo=None, estado=None):
@@ -909,7 +980,7 @@ class DatabaseManager:
             params.append(estado)
         query += " ORDER BY fecha_vencimiento ASC"
         df = pd.read_sql_query(query, conn, params=params)
-        conn.close()
+        self.release_connection(conn)
         return df
 
     def marcar_cuenta_pagada(self, cuenta_id):
@@ -919,14 +990,14 @@ class DatabaseManager:
         cursor.execute("UPDATE cuentas_por_pagar_cobrar SET estado = 'Pagado', fecha_pago = %s WHERE id = %s",
                        (hoy, cuenta_id))
         conn.commit()
-        conn.close()
+        self.release_connection(conn)
 
     def eliminar_cuenta(self, cuenta_id):
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("DELETE FROM cuentas_por_pagar_cobrar WHERE id = %s", (cuenta_id,))
         conn.commit()
-        conn.close()
+        self.release_connection(conn)
 
 
 # ==================== CLASES DE DATOS ====================
@@ -1579,7 +1650,13 @@ def main():
     with tab0:
         st.header("📊 Dashboard - Resumen de tu Negocio")
 
-        dashboard_data = db.obtener_dashboard_data()
+        # NUEVO v4.1: cache de 20s para no recalcular todo el dashboard en
+        # cada rerun de Streamlit (cada clic en cualquier parte de la app).
+        @st.cache_data(ttl=20)
+        def _dashboard_data_cached(_db):
+            return _db.obtener_dashboard_data()
+
+        dashboard_data = _dashboard_data_cached(db)
         mes_actual = dashboard_data['mes_actual']
 
         st.subheader(f"📅 Resumen del Mes - {datetime.now().strftime('%B %Y')}")
@@ -1676,9 +1753,16 @@ def main():
 
         st.divider()
         st.subheader("Totales Acumulados por Unidad")
+
+        # NUEVO v4.1: cache de 20s para los totales por placa (se usa 2 veces
+        # en este mismo tab: para la placa seleccionada y para la comparativa).
+        @st.cache_data(ttl=20)
+        def _totales_por_placa_cached(_db):
+            return _db.obtener_totales_por_placa()
+
         placa_seleccionada = st.selectbox("Selecciona una placa", sorted(PLACA_CONDUCTOR.keys()))
         if placa_seleccionada:
-            df_totales = db.obtener_totales_por_placa()
+            df_totales = _totales_por_placa_cached(db)
             if not df_totales.empty:
                 df_placa = df_totales[df_totales['placa'] == placa_seleccionada]
                 if not df_placa.empty:
@@ -1699,7 +1783,7 @@ def main():
                 st.info("No hay datos para esta placa")
 
         st.subheader("Comparativa entre Unidades")
-        df_totales = db.obtener_totales_por_placa()
+        df_totales = _totales_por_placa_cached(db)
         if not df_totales.empty:
             fig_utilidad = px.bar(df_totales, x='placa', y='total_ut', title="Utilidad Total por Unidad")
             st.plotly_chart(fig_utilidad)
@@ -1837,15 +1921,11 @@ def main():
 
         if st.session_state.rutas:
             st.subheader("Rutas Registradas")
-            conn = st.session_state.db.get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica, es_riohacha
-                FROM rutas
-                ORDER BY origen, destino
-            """)
-            rutas_con_id = cursor.fetchall()
-            conn.close()
+            # NUEVO v4.1: antes esto volvía a abrir una conexión y a consultar
+            # la tabla `rutas` por segunda vez en el mismo render, solo para
+            # mostrar la lista con botón de eliminar. Ahora usa un único
+            # método (obtener_rutas_con_id) que reutiliza el pool.
+            rutas_con_id = db.obtener_rutas_con_id()
 
             for ruta_data in rutas_con_id:
                 ruta_id = ruta_data[0]
