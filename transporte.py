@@ -1,6 +1,6 @@
 """
 Sistema de Programación de Rutas y Cálculo de Costos para Tractomulas
-Versión 4.3 - Conectado a Supabase (PostgreSQL) - ACTUALIZADO
+Versión 4.5 - Conectado a Supabase (PostgreSQL) - ACTUALIZADO
 Contexto: Colombia
 Autor: Sistema de Gestión de Transporte de Carga
 
@@ -68,6 +68,28 @@ CAMBIOS EN ESTA VERSIÓN (v4.4 - NAVEGACIÓN PERSISTENTE):
   viaje, liquidación, cuenta) y hacer st.rerun(), la app ya NO te regresa
   al Dashboard. Se reemplazó st.tabs() (que no conserva la pestaña activa
   entre reruns) por una navegación manual basada en st.session_state.
+
+CAMBIOS EN ESTA VERSIÓN (v4.5 - FIXES DE ESTABILIDAD Y RENDIMIENTO):
+- CORREGIDO (BUG CRÍTICO): en los formularios de Tractomulas (Tab 1) y
+  Conductores (Tab 3), el campo de texto "(Escribir nueva/nuevo)" estaba
+  DENTRO de un st.form(). En Streamlit, los widgets dentro de un form no
+  disparan un rerun hasta que se presiona el botón de submit, así que ese
+  campo de texto se creaba recién en el mismo instante del submit y
+  llegaba vacío. Por eso "no se guardaba" el conductor/tractomula nueva.
+  SOLUCIÓN: el selectbox que decide si hay que mostrar el campo manual
+  ahora vive FUERA del form, y el form solo contiene el resto de campos.
+- CORREGIDO (BUG CRÍTICO - LENTITUD / CONGELAMIENTO): casi todos los
+  métodos de DatabaseManager tomaban una conexión del pool
+  (self.get_connection()) pero solo la devolvían (self.release_connection)
+  si NO había ningún error. Si una consulta fallaba por cualquier motivo,
+  la conexión quedaba "perdida" para siempre (nunca volvía al pool). Como
+  el pool tiene un máximo de conexiones, después de suficientes fallos el
+  pool se agotaba y la app se quedaba colgada esperando una conexión libre
+  al cambiar de pestaña o hacer cualquier consulta. SOLUCIÓN: todos los
+  métodos ahora usan try/finally para GARANTIZAR que la conexión siempre
+  se devuelva al pool, haya o no haya error.
+- NUEVO: se subió el tamaño máximo del pool de conexiones de 10 a 20, para
+  dar más margen mientras la app tiene picos de uso concurrente.
 """
 
 import streamlit as st
@@ -99,13 +121,15 @@ except:
 SUPABASE_DB_URL = "postgresql://postgres.wiomyjrmsrhcgvhgkbqe:Conejito800$@aws-1-us-west-2.pooler.supabase.com:6543/postgres"
 
 
-# ==================== POOL DE CONEXIONES (NUEVO v4.1) ====================
+# ==================== POOL DE CONEXIONES (NUEVO v4.1, ampliado v4.5) ====================
 # Se cachea a nivel de proceso con st.cache_resource: todas las sesiones de
 # Streamlit reutilizan el mismo pool de conexiones ya abiertas, en vez de
 # abrir/cerrar una conexión TCP+TLS nueva contra Supabase en cada consulta.
+# v4.5: máximo subido de 10 a 20 conexiones como margen adicional, además de
+# la corrección de fugas de conexión (ver DatabaseManager).
 @st.cache_resource
 def get_db_pool():
-    return pg_pool.ThreadedConnectionPool(1, 10, SUPABASE_DB_URL)
+    return pg_pool.ThreadedConnectionPool(1, 20, SUPABASE_DB_URL)
 
 
 # Bandera global (a nivel de proceso) para no re-correr las migraciones
@@ -166,7 +190,13 @@ class DatabaseManager:
     v4.1: usa un pool de conexiones cacheado (get_db_pool) en vez de abrir
     una conexión nueva en cada método. get_connection() toma una conexión
     prestada del pool y release_connection() la devuelve para que se
-    reutilice en la siguiente consulta."""
+    reutilice en la siguiente consulta.
+
+    v4.5: TODOS los métodos ahora usan try/finally alrededor de
+    get_connection()/release_connection() para garantizar que la conexión
+    SIEMPRE se devuelva al pool, incluso si la consulta falla. Antes, un
+    error a mitad de una consulta dejaba la conexión "perdida" para
+    siempre, y con el tiempo el pool se agotaba y la app se colgaba."""
 
     def __init__(self):
         self.pool = get_db_pool()
@@ -193,6 +223,7 @@ class DatabaseManager:
         global _db_initialized
         if _db_initialized:
             return
+        conn = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -352,10 +383,12 @@ class DatabaseManager:
             ''')
 
             conn.commit()
-            self.release_connection(conn)
             _db_initialized = True
         except Exception as e:
             st.error(f"Error inicializando base de datos: {e}")
+        finally:
+            if conn is not None:
+                self.release_connection(conn)
 
     def guardar_viaje(self, calculadora, fecha_viaje, observaciones="", cliente=""):
         """Guarda un viaje en la base de datos de forma segura con HORA COLOMBIA.
@@ -368,6 +401,7 @@ class DatabaseManager:
         cliente Agofer es distancia_ruta x numero_viajes; para los demás
         casos es igual a la distancia de la ruta, como siempre. También se
         guarda el peso (kg)."""
+        conn = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -457,72 +491,83 @@ class DatabaseManager:
                 st.warning("El viaje se guardó pero no se pudo recuperar el ID.")
 
             conn.commit()
-            self.release_connection(conn)
             return viaje_id
 
         except Exception as e:
             st.error(f"❌ Error detallado al guardar: {e}")
             return None
+        finally:
+            if conn is not None:
+                self.release_connection(conn)
 
     def obtener_todos_viajes(self):
         conn = self.get_connection()
-        query = "SELECT * FROM viajes_v4 ORDER BY fecha_creacion DESC"
-        df = pd.read_sql_query(query, conn)
-        self.release_connection(conn)
-        return df
+        try:
+            query = "SELECT * FROM viajes_v4 ORDER BY fecha_creacion DESC"
+            df = pd.read_sql_query(query, conn)
+            return df
+        finally:
+            self.release_connection(conn)
 
     def buscar_viajes(self, fecha_inicio=None, fecha_fin=None, placa=None, conductor=None, origen=None, destino=None, cliente=None):
         """Filtra por fecha_viaje (fecha real en que ocurrió el viaje), no por fecha_creacion
         (que es cuándo se registró en el sistema)."""
         conn = self.get_connection()
-        query = "SELECT * FROM viajes_v4 WHERE 1=1"
-        params = []
-        if fecha_inicio:
-            query += " AND fecha_viaje >= %s"
-            params.append(fecha_inicio)
-        if fecha_fin:
-            query += " AND fecha_viaje <= %s"
-            params.append(fecha_fin)
-        if placa:
-            query += " AND placa = %s"
-            params.append(placa)
-        if conductor:
-            query += " AND conductor ILIKE %s"
-            params.append(f"%{conductor}%")
-        if origen:
-            query += " AND origen ILIKE %s"
-            params.append(f"%{origen}%")
-        if destino:
-            query += " AND destino ILIKE %s"
-            params.append(f"%{destino}%")
-        if cliente:
-            query += " AND cliente ILIKE %s"
-            params.append(f"%{cliente}%")
-        query += " ORDER BY fecha_creacion DESC"
-        df = pd.read_sql_query(query, conn, params=params)
-        self.release_connection(conn)
-        return df
+        try:
+            query = "SELECT * FROM viajes_v4 WHERE 1=1"
+            params = []
+            if fecha_inicio:
+                query += " AND fecha_viaje >= %s"
+                params.append(fecha_inicio)
+            if fecha_fin:
+                query += " AND fecha_viaje <= %s"
+                params.append(fecha_fin)
+            if placa:
+                query += " AND placa = %s"
+                params.append(placa)
+            if conductor:
+                query += " AND conductor ILIKE %s"
+                params.append(f"%{conductor}%")
+            if origen:
+                query += " AND origen ILIKE %s"
+                params.append(f"%{origen}%")
+            if destino:
+                query += " AND destino ILIKE %s"
+                params.append(f"%{destino}%")
+            if cliente:
+                query += " AND cliente ILIKE %s"
+                params.append(f"%{cliente}%")
+            query += " ORDER BY fecha_creacion DESC"
+            df = pd.read_sql_query(query, conn, params=params)
+            return df
+        finally:
+            self.release_connection(conn)
 
     def obtener_viaje_por_id(self, viaje_id):
         conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM viajes_v4 WHERE id = %s", (viaje_id,))
-        viaje = cursor.fetchone()
-        self.release_connection(conn)
-        return viaje
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM viajes_v4 WHERE id = %s", (viaje_id,))
+            viaje = cursor.fetchone()
+            return viaje
+        finally:
+            self.release_connection(conn)
 
     def eliminar_viaje(self, viaje_id):
         conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM viajes_v4 WHERE id = %s", (viaje_id,))
-        conn.commit()
-        self.release_connection(conn)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM viajes_v4 WHERE id = %s", (viaje_id,))
+            conn.commit()
+        finally:
+            self.release_connection(conn)
 
     def actualizar_viaje(self, viaje_id, calculadora, fecha_viaje, observaciones="", cliente="", galones_reales=None):
         """Recalcula y actualiza un viaje ya guardado (edición desde Trazabilidad).
         No modifica fecha_creacion (fecha de registro original).
         v4.3: distancia_km se actualiza con la distancia EFECTIVA (ver guardar_viaje)
         y también se guarda el peso."""
+        conn = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -566,29 +611,34 @@ class DatabaseManager:
                 int(calculadora.numero_viajes), float(calculadora.peso), viaje_id
             ))
             conn.commit()
-            self.release_connection(conn)
             return True
         except Exception as e:
             st.error(f"❌ Error al actualizar el viaje: {e}")
             return False
+        finally:
+            if conn is not None:
+                self.release_connection(conn)
 
     def obtener_viajes_con_consumo(self, placa=None):
         """Trae los viajes que tienen galones_reales registrados, para comparar contra el
         consumo teórico (galones_necesarios) y detectar sobreconsumo."""
         conn = self.get_connection()
-        query = """
-            SELECT id, fecha_viaje, placa, conductor, origen, destino, distancia_km,
-                   galones_necesarios, galones_reales, combustible
-            FROM viajes_v4
-            WHERE galones_reales IS NOT NULL AND galones_reales > 0
-        """
-        params = []
-        if placa:
-            query += " AND placa = %s"
-            params.append(placa)
-        query += " ORDER BY fecha_viaje DESC"
-        df = pd.read_sql_query(query, conn, params=params)
-        self.release_connection(conn)
+        try:
+            query = """
+                SELECT id, fecha_viaje, placa, conductor, origen, destino, distancia_km,
+                       galones_necesarios, galones_reales, combustible
+                FROM viajes_v4
+                WHERE galones_reales IS NOT NULL AND galones_reales > 0
+            """
+            params = []
+            if placa:
+                query += " AND placa = %s"
+                params.append(placa)
+            query += " ORDER BY fecha_viaje DESC"
+            df = pd.read_sql_query(query, conn, params=params)
+        finally:
+            self.release_connection(conn)
+
         if not df.empty:
             df['diferencia_galones'] = df['galones_reales'] - df['galones_necesarios']
             df['porcentaje_sobreconsumo'] = (
@@ -598,9 +648,9 @@ class DatabaseManager:
 
     def obtener_estadisticas(self):
         conn = self.get_connection()
-        cursor = conn.cursor()
         stats = {}
         try:
+            cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM viajes_v4")
             stats['total_viajes'] = cursor.fetchone()[0]
             cursor.execute("SELECT SUM(distancia_km) FROM viajes_v4")
@@ -615,17 +665,18 @@ class DatabaseManager:
             stats['rutas_frecuentes'] = cursor.fetchall()
         except Exception:
             stats = {'total_viajes': 0, 'total_km': 0, 'total_gastos': 0, 'viajes_por_placa': [], 'viajes_por_conductor': [], 'rutas_frecuentes': []}
-        self.release_connection(conn)
+        finally:
+            self.release_connection(conn)
         return stats
 
     def obtener_dashboard_data(self):
         conn = self.get_connection()
-        cursor = conn.cursor()
         hoy = datetime.now()
         inicio_mes = hoy.replace(day=1).strftime('%Y-%m-%d')
         data = {}
 
         try:
+            cursor = conn.cursor()
             cursor.execute("""
                 SELECT COUNT(*) as total_viajes, SUM(distancia_km) as total_km,
                        SUM(total_gastos) as total_gastos, SUM(valor_flete) as total_ingresos,
@@ -706,71 +757,74 @@ class DatabaseManager:
             data['rutas_rentables'] = []
             data['evolucion_6_meses'] = []
             data['viajes_no_rentables'] = []
+        finally:
+            self.release_connection(conn)
 
-        self.release_connection(conn)
         return data
 
     def obtener_totales_por_placa(self, fecha_inicio=None, fecha_fin=None):
         """Obtiene totales acumulados por placa con filtros de fecha (incluye conceptos nuevos)"""
         conn = self.get_connection()
-        query = """
-            SELECT placa, SUM(valor_flete) as total_cxc, SUM(nomina_admin) as total_admin,
-                   SUM(nomina_conductor) as total_parafiscales, SUM(comision_conductor) as total_comision,
-                   SUM(mantenimiento) as total_mantenimiento, SUM(seguros) as total_seguros,
-                   SUM(tecnomecanica) as total_tecnomecanica, SUM(llantas) as total_llantas,
-                   SUM(aceite) as total_aceite, SUM(combustible) as total_combustible,
-                   SUM(flypass) as total_flypass, SUM(peajes) as total_peajes,
-                   SUM(urea_acpm) as total_urea_acpm,
-                   SUM(cruce_frontera) as total_cruce_frontera, SUM(hotel) as total_hotel,
-                   SUM(comida) as total_comida, SUM(transporte) as total_transporte,
-                   SUM(parqueo) as total_parqueo, SUM(propina_comision) as total_propina_comision,
-                   SUM(cargue_descargue) as total_cargue_descargue, SUM(otros) as total_otros,
-                   SUM(legalizacion) as total_legalizacion, SUM(anticipo) as total_anticipos,
-                   SUM(saldo) as total_saldo, SUM(ant_empresa) as total_ant_empresa,
-                   SUM(saldo_empresa) as total_saldo_empresa
-            FROM viajes_v4 WHERE 1=1
-        """
-        params = []
-        if fecha_inicio:
-            query += " AND fecha_viaje >= %s"
-            params.append(fecha_inicio)
-        if fecha_fin:
-            query += " AND fecha_viaje <= %s"
-            params.append(fecha_fin)
-        query += " GROUP BY placa ORDER BY placa"
-
         try:
-            df = pd.read_sql_query(query, conn, params=params)
-            if not df.empty:
-                # TOTAL GASTOS = suma de todos los conceptos (incluye los 3 nuevos)
-                df['total_gastos'] = (
-                    df['total_admin'] + df['total_parafiscales'] + df['total_comision'] +
-                    df['total_mantenimiento'] + df['total_seguros'] + df['total_tecnomecanica'] +
-                    df['total_llantas'] + df['total_aceite'] + df['total_combustible'] +
-                    df['total_flypass'] + df['total_peajes'] + df['total_urea_acpm'] +
-                    df['total_cruce_frontera'] + df['total_hotel'] + df['total_comida'] +
-                    df['total_transporte'] + df['total_parqueo'] + df['total_propina_comision'] +
-                    df['total_cargue_descargue'] + df['total_otros']
-                )
-                # PUNTO DE EQUILIBRIO = TOTAL CXC x 40%
-                df['total_punto_equilibrio'] = df['total_cxc'] * 0.40
-                # UT TOTAL = TOTAL CXC - TOTAL GASTOS
-                df['total_ut'] = df['total_cxc'] - df['total_gastos']
-                # RENTABILIDAD = UT TOTAL / TOTAL CXC (en %)
-                df['total_rentabilidad'] = (df['total_ut'] / df['total_cxc'] * 100).where(df['total_cxc'] != 0, 0)
-                # SALDO = TOTAL ANTICIPOS - TOTAL LEGALIZACION
-                df['total_saldo'] = df['total_anticipos'] - df['total_legalizacion']
-        except Exception:
-            df = pd.DataFrame()
+            query = """
+                SELECT placa, SUM(valor_flete) as total_cxc, SUM(nomina_admin) as total_admin,
+                       SUM(nomina_conductor) as total_parafiscales, SUM(comision_conductor) as total_comision,
+                       SUM(mantenimiento) as total_mantenimiento, SUM(seguros) as total_seguros,
+                       SUM(tecnomecanica) as total_tecnomecanica, SUM(llantas) as total_llantas,
+                       SUM(aceite) as total_aceite, SUM(combustible) as total_combustible,
+                       SUM(flypass) as total_flypass, SUM(peajes) as total_peajes,
+                       SUM(urea_acpm) as total_urea_acpm,
+                       SUM(cruce_frontera) as total_cruce_frontera, SUM(hotel) as total_hotel,
+                       SUM(comida) as total_comida, SUM(transporte) as total_transporte,
+                       SUM(parqueo) as total_parqueo, SUM(propina_comision) as total_propina_comision,
+                       SUM(cargue_descargue) as total_cargue_descargue, SUM(otros) as total_otros,
+                       SUM(legalizacion) as total_legalizacion, SUM(anticipo) as total_anticipos,
+                       SUM(saldo) as total_saldo, SUM(ant_empresa) as total_ant_empresa,
+                       SUM(saldo_empresa) as total_saldo_empresa
+                FROM viajes_v4 WHERE 1=1
+            """
+            params = []
+            if fecha_inicio:
+                query += " AND fecha_viaje >= %s"
+                params.append(fecha_inicio)
+            if fecha_fin:
+                query += " AND fecha_viaje <= %s"
+                params.append(fecha_fin)
+            query += " GROUP BY placa ORDER BY placa"
 
-        self.release_connection(conn)
-        return df
+            try:
+                df = pd.read_sql_query(query, conn, params=params)
+                if not df.empty:
+                    # TOTAL GASTOS = suma de todos los conceptos (incluye los 3 nuevos)
+                    df['total_gastos'] = (
+                        df['total_admin'] + df['total_parafiscales'] + df['total_comision'] +
+                        df['total_mantenimiento'] + df['total_seguros'] + df['total_tecnomecanica'] +
+                        df['total_llantas'] + df['total_aceite'] + df['total_combustible'] +
+                        df['total_flypass'] + df['total_peajes'] + df['total_urea_acpm'] +
+                        df['total_cruce_frontera'] + df['total_hotel'] + df['total_comida'] +
+                        df['total_transporte'] + df['total_parqueo'] + df['total_propina_comision'] +
+                        df['total_cargue_descargue'] + df['total_otros']
+                    )
+                    # PUNTO DE EQUILIBRIO = TOTAL CXC x 40%
+                    df['total_punto_equilibrio'] = df['total_cxc'] * 0.40
+                    # UT TOTAL = TOTAL CXC - TOTAL GASTOS
+                    df['total_ut'] = df['total_cxc'] - df['total_gastos']
+                    # RENTABILIDAD = UT TOTAL / TOTAL CXC (en %)
+                    df['total_rentabilidad'] = (df['total_ut'] / df['total_cxc'] * 100).where(df['total_cxc'] != 0, 0)
+                    # SALDO = TOTAL ANTICIPOS - TOTAL LEGALIZACION
+                    df['total_saldo'] = df['total_anticipos'] - df['total_legalizacion']
+            except Exception:
+                df = pd.DataFrame()
+
+            return df
+        finally:
+            self.release_connection(conn)
 
     # Métodos para tractomulas
     def guardar_tractomula(self, tractomula):
         conn = self.get_connection()
-        cursor = conn.cursor()
         try:
+            cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO tractomulas (placa, consumo_km_galon, tipo)
                 VALUES (%s, %s, %s)
@@ -784,30 +838,34 @@ class DatabaseManager:
 
     def obtener_tractomulas(self):
         conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM tractomulas ORDER BY placa")
-        tractomulas = []
-        for row in cursor.fetchall():
-            tractomulas.append(Tractomula(
-                placa=row[1],
-                consumo_km_galon=row[2],
-                tipo=row[3]
-            ))
-        self.release_connection(conn)
-        return tractomulas
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM tractomulas ORDER BY placa")
+            tractomulas = []
+            for row in cursor.fetchall():
+                tractomulas.append(Tractomula(
+                    placa=row[1],
+                    consumo_km_galon=row[2],
+                    tipo=row[3]
+                ))
+            return tractomulas
+        finally:
+            self.release_connection(conn)
 
     def eliminar_tractomula(self, placa):
         conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM tractomulas WHERE placa = %s", (placa,))
-        conn.commit()
-        self.release_connection(conn)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM tractomulas WHERE placa = %s", (placa,))
+            conn.commit()
+        finally:
+            self.release_connection(conn)
 
     # Métodos para conductores
     def guardar_conductor(self, conductor):
         conn = self.get_connection()
-        cursor = conn.cursor()
         try:
+            cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO conductores (nombre, cedula)
                 VALUES (%s, %s)
@@ -821,244 +879,274 @@ class DatabaseManager:
 
     def obtener_conductores(self):
         conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM conductores ORDER BY nombre")
-        conductores = []
-        for row in cursor.fetchall():
-            conductores.append(Conductor(nombre=row[1], cedula=row[2]))
-        self.release_connection(conn)
-        return conductores
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM conductores ORDER BY nombre")
+            conductores = []
+            for row in cursor.fetchall():
+                conductores.append(Conductor(nombre=row[1], cedula=row[2]))
+            return conductores
+        finally:
+            self.release_connection(conn)
 
     def eliminar_conductor(self, nombre):
         conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM conductores WHERE nombre = %s", (nombre,))
-        conn.commit()
-        self.release_connection(conn)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM conductores WHERE nombre = %s", (nombre,))
+            conn.commit()
+        finally:
+            self.release_connection(conn)
 
     # ---------------- Métodos para rutas (CORREGIDOS) ----------------
     def guardar_ruta(self, ruta):
         """Guarda una ruta, incluye Riohacha y los valores por defecto de gastos variables.
         CORREGIDO: ahora usa RETURNING id para devolver el ID correctamente."""
         conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO rutas (
-                origen, destino, distancia_km, es_frontera, es_regional, es_aguachica,
-                es_riohacha, default_flypass, default_peajes, default_urea_acpm,
-                default_hotel, default_comida, default_transporte,
-                default_propina_comision, default_cargue_descargue, default_otros
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            RETURNING id
-        ''', (
-            ruta.origen,
-            ruta.destino,
-            ruta.distancia_km,
-            1 if ruta.es_frontera else 0,
-            1 if ruta.es_regional else 0,
-            1 if ruta.es_aguachica else 0,
-            1 if ruta.es_riohacha else 0,
-            ruta.default_flypass,
-            ruta.default_peajes,
-            ruta.default_urea_acpm,
-            ruta.default_hotel,
-            ruta.default_comida,
-            ruta.default_transporte,
-            ruta.default_propina_comision,
-            ruta.default_cargue_descargue,
-            ruta.default_otros,
-        ))
-        result = cursor.fetchone()
-        ruta_id = result[0] if result else None
-        conn.commit()
-        self.release_connection(conn)
-        return ruta_id
+        try:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO rutas (
+                    origen, destino, distancia_km, es_frontera, es_regional, es_aguachica,
+                    es_riohacha, default_flypass, default_peajes, default_urea_acpm,
+                    default_hotel, default_comida, default_transporte,
+                    default_propina_comision, default_cargue_descargue, default_otros
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            ''', (
+                ruta.origen,
+                ruta.destino,
+                ruta.distancia_km,
+                1 if ruta.es_frontera else 0,
+                1 if ruta.es_regional else 0,
+                1 if ruta.es_aguachica else 0,
+                1 if ruta.es_riohacha else 0,
+                ruta.default_flypass,
+                ruta.default_peajes,
+                ruta.default_urea_acpm,
+                ruta.default_hotel,
+                ruta.default_comida,
+                ruta.default_transporte,
+                ruta.default_propina_comision,
+                ruta.default_cargue_descargue,
+                ruta.default_otros,
+            ))
+            result = cursor.fetchone()
+            ruta_id = result[0] if result else None
+            conn.commit()
+            return ruta_id
+        finally:
+            self.release_connection(conn)
 
     def obtener_rutas(self):
         """Obtiene rutas con columnas explícitas (incluye Riohacha y defaults).
         CORREGIDO: se eliminaron las 2 definiciones duplicadas que existían antes;
         esta es la única versión."""
         conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica,
-                   es_riohacha, default_flypass, default_peajes, default_urea_acpm,
-                   default_hotel, default_comida, default_transporte,
-                   default_propina_comision, default_cargue_descargue, default_otros
-            FROM rutas
-            ORDER BY origen, destino
-        """)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica,
+                       es_riohacha, default_flypass, default_peajes, default_urea_acpm,
+                       default_hotel, default_comida, default_transporte,
+                       default_propina_comision, default_cargue_descargue, default_otros
+                FROM rutas
+                ORDER BY origen, destino
+            """)
 
-        rutas = []
-        for row in cursor.fetchall():
-            rutas.append(Ruta(
-                origen=row[1],
-                destino=row[2],
-                distancia_km=row[3],
-                es_frontera=bool(row[4]),
-                es_regional=bool(row[5]),
-                es_aguachica=bool(row[6]),
-                es_riohacha=bool(row[7]),
-                default_flypass=row[8] or 0.0,
-                default_peajes=row[9] or 0.0,
-                default_urea_acpm=row[10] or 0.0,
-                default_hotel=row[11] or 0.0,
-                default_comida=row[12] or 0.0,
-                default_transporte=row[13] or 0.0,
-                default_propina_comision=row[14] or 0.0,
-                default_cargue_descargue=row[15] or 0.0,
-                default_otros=row[16] or 0.0,
-            ))
-        self.release_connection(conn)
-        return rutas
+            rutas = []
+            for row in cursor.fetchall():
+                rutas.append(Ruta(
+                    origen=row[1],
+                    destino=row[2],
+                    distancia_km=row[3],
+                    es_frontera=bool(row[4]),
+                    es_regional=bool(row[5]),
+                    es_aguachica=bool(row[6]),
+                    es_riohacha=bool(row[7]),
+                    default_flypass=row[8] or 0.0,
+                    default_peajes=row[9] or 0.0,
+                    default_urea_acpm=row[10] or 0.0,
+                    default_hotel=row[11] or 0.0,
+                    default_comida=row[12] or 0.0,
+                    default_transporte=row[13] or 0.0,
+                    default_propina_comision=row[14] or 0.0,
+                    default_cargue_descargue=row[15] or 0.0,
+                    default_otros=row[16] or 0.0,
+                ))
+            return rutas
+        finally:
+            self.release_connection(conn)
 
     def obtener_rutas_con_id(self):
         """NUEVO v4.1: trae (id, origen, destino, distancia_km, es_frontera, es_regional,
         es_aguachica, es_riohacha) en una sola consulta, para no tener que volver a pegarle
         a la tabla `rutas` en el Tab 2 solo para mostrar la lista con botón de eliminar."""
         conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica, es_riohacha
-            FROM rutas
-            ORDER BY origen, destino
-        """)
-        rutas_con_id = cursor.fetchall()
-        self.release_connection(conn)
-        return rutas_con_id
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica, es_riohacha
+                FROM rutas
+                ORDER BY origen, destino
+            """)
+            rutas_con_id = cursor.fetchall()
+            return rutas_con_id
+        finally:
+            self.release_connection(conn)
 
     def eliminar_ruta(self, ruta_id):
         conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM rutas WHERE id = %s", (ruta_id,))
-        conn.commit()
-        self.release_connection(conn)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM rutas WHERE id = %s", (ruta_id,))
+            conn.commit()
+        finally:
+            self.release_connection(conn)
 
     # ---------------- Métodos para Liquidaciones de Conductores ----------------
     def obtener_viajes_para_liquidar(self, conductor, periodo_inicio, periodo_fin):
         """Trae los viajes de un conductor en un rango de fechas (por fecha_viaje real)"""
         conn = self.get_connection()
-        query = """
-            SELECT id, fecha_viaje, placa, origen, destino, comision_conductor
-            FROM viajes_v4
-            WHERE conductor = %s AND fecha_viaje >= %s AND fecha_viaje <= %s
-            ORDER BY fecha_viaje
-        """
-        df = pd.read_sql_query(query, conn, params=[conductor, periodo_inicio, periodo_fin])
-        self.release_connection(conn)
-        return df
+        try:
+            query = """
+                SELECT id, fecha_viaje, placa, origen, destino, comision_conductor
+                FROM viajes_v4
+                WHERE conductor = %s AND fecha_viaje >= %s AND fecha_viaje <= %s
+                ORDER BY fecha_viaje
+            """
+            df = pd.read_sql_query(query, conn, params=[conductor, periodo_inicio, periodo_fin])
+            return df
+        finally:
+            self.release_connection(conn)
 
     def guardar_liquidacion(self, conductor, periodo_inicio, periodo_fin, df_viajes, observaciones=""):
         """Calcula y guarda la liquidación de un conductor para un periodo (ej. quincena).
         Total a Pagar = Total Comisiones (no se suma nómina ni se resta anticipo)."""
         conn = self.get_connection()
-        cursor = conn.cursor()
+        try:
+            cursor = conn.cursor()
 
-        total_comisiones = float(df_viajes['comision_conductor'].sum()) if not df_viajes.empty else 0.0
-        total_a_pagar = total_comisiones
-        viajes_incluidos = ",".join(str(i) for i in df_viajes['id'].tolist()) if not df_viajes.empty else ""
-        cantidad_viajes = len(df_viajes)
-        placas = ", ".join(sorted(df_viajes['placa'].unique())) if not df_viajes.empty else ""
+            total_comisiones = float(df_viajes['comision_conductor'].sum()) if not df_viajes.empty else 0.0
+            total_a_pagar = total_comisiones
+            viajes_incluidos = ",".join(str(i) for i in df_viajes['id'].tolist()) if not df_viajes.empty else ""
+            cantidad_viajes = len(df_viajes)
+            placas = ", ".join(sorted(df_viajes['placa'].unique())) if not df_viajes.empty else ""
 
-        hora_colombia = datetime.now() - timedelta(hours=5)
-        fecha_creacion = hora_colombia.strftime('%Y-%m-%d %H:%M:%S')
+            hora_colombia = datetime.now() - timedelta(hours=5)
+            fecha_creacion = hora_colombia.strftime('%Y-%m-%d %H:%M:%S')
 
-        cursor.execute('''
-            INSERT INTO liquidaciones_conductor (
-                conductor, periodo_inicio, periodo_fin, viajes_incluidos, cantidad_viajes, placas,
-                total_comisiones, total_a_pagar,
-                estado, observaciones, fecha_creacion
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'Pendiente', %s, %s)
-            RETURNING id
-        ''', (conductor, periodo_inicio, periodo_fin, viajes_incluidos, cantidad_viajes, placas,
-              total_comisiones, total_a_pagar,
-              observaciones, fecha_creacion))
-        result = cursor.fetchone()
-        liquidacion_id = result[0] if result else None
-        conn.commit()
-        self.release_connection(conn)
-        return liquidacion_id, cantidad_viajes, placas, total_comisiones, total_a_pagar
+            cursor.execute('''
+                INSERT INTO liquidaciones_conductor (
+                    conductor, periodo_inicio, periodo_fin, viajes_incluidos, cantidad_viajes, placas,
+                    total_comisiones, total_a_pagar,
+                    estado, observaciones, fecha_creacion
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'Pendiente', %s, %s)
+                RETURNING id
+            ''', (conductor, periodo_inicio, periodo_fin, viajes_incluidos, cantidad_viajes, placas,
+                  total_comisiones, total_a_pagar,
+                  observaciones, fecha_creacion))
+            result = cursor.fetchone()
+            liquidacion_id = result[0] if result else None
+            conn.commit()
+            return liquidacion_id, cantidad_viajes, placas, total_comisiones, total_a_pagar
+        finally:
+            self.release_connection(conn)
 
     def obtener_liquidaciones(self, conductor=None, estado=None):
         conn = self.get_connection()
-        query = "SELECT * FROM liquidaciones_conductor WHERE 1=1"
-        params = []
-        if conductor:
-            query += " AND conductor = %s"
-            params.append(conductor)
-        if estado:
-            query += " AND estado = %s"
-            params.append(estado)
-        query += " ORDER BY periodo_inicio DESC"
-        df = pd.read_sql_query(query, conn, params=params)
-        self.release_connection(conn)
-        return df
+        try:
+            query = "SELECT * FROM liquidaciones_conductor WHERE 1=1"
+            params = []
+            if conductor:
+                query += " AND conductor = %s"
+                params.append(conductor)
+            if estado:
+                query += " AND estado = %s"
+                params.append(estado)
+            query += " ORDER BY periodo_inicio DESC"
+            df = pd.read_sql_query(query, conn, params=params)
+            return df
+        finally:
+            self.release_connection(conn)
 
     def marcar_liquidacion_pagada(self, liquidacion_id):
         conn = self.get_connection()
-        cursor = conn.cursor()
-        hoy = (datetime.now() - timedelta(hours=5)).strftime('%Y-%m-%d')
-        cursor.execute("UPDATE liquidaciones_conductor SET estado = 'Pagada', fecha_pago = %s WHERE id = %s",
-                       (hoy, liquidacion_id))
-        conn.commit()
-        self.release_connection(conn)
+        try:
+            cursor = conn.cursor()
+            hoy = (datetime.now() - timedelta(hours=5)).strftime('%Y-%m-%d')
+            cursor.execute("UPDATE liquidaciones_conductor SET estado = 'Pagada', fecha_pago = %s WHERE id = %s",
+                           (hoy, liquidacion_id))
+            conn.commit()
+        finally:
+            self.release_connection(conn)
 
     def eliminar_liquidacion(self, liquidacion_id):
         conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM liquidaciones_conductor WHERE id = %s", (liquidacion_id,))
-        conn.commit()
-        self.release_connection(conn)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM liquidaciones_conductor WHERE id = %s", (liquidacion_id,))
+            conn.commit()
+        finally:
+            self.release_connection(conn)
 
     # ---------------- Métodos para Cuentas por Pagar/Cobrar ----------------
     def guardar_cuenta(self, tipo, concepto, tercero, monto, fecha_vencimiento, observaciones="", viaje_id=None):
         conn = self.get_connection()
-        cursor = conn.cursor()
-        hora_colombia = datetime.now() - timedelta(hours=5)
-        fecha_creacion = hora_colombia.strftime('%Y-%m-%d %H:%M:%S')
-        cursor.execute('''
-            INSERT INTO cuentas_por_pagar_cobrar (
-                tipo, concepto, tercero, monto, fecha_vencimiento, estado, observaciones, viaje_id, fecha_creacion
-            ) VALUES (%s, %s, %s, %s, %s, 'Pendiente', %s, %s, %s)
-            RETURNING id
-        ''', (tipo, concepto, tercero, monto, fecha_vencimiento, observaciones, viaje_id, fecha_creacion))
-        result = cursor.fetchone()
-        cuenta_id = result[0] if result else None
-        conn.commit()
-        self.release_connection(conn)
-        return cuenta_id
+        try:
+            cursor = conn.cursor()
+            hora_colombia = datetime.now() - timedelta(hours=5)
+            fecha_creacion = hora_colombia.strftime('%Y-%m-%d %H:%M:%S')
+            cursor.execute('''
+                INSERT INTO cuentas_por_pagar_cobrar (
+                    tipo, concepto, tercero, monto, fecha_vencimiento, estado, observaciones, viaje_id, fecha_creacion
+                ) VALUES (%s, %s, %s, %s, %s, 'Pendiente', %s, %s, %s)
+                RETURNING id
+            ''', (tipo, concepto, tercero, monto, fecha_vencimiento, observaciones, viaje_id, fecha_creacion))
+            result = cursor.fetchone()
+            cuenta_id = result[0] if result else None
+            conn.commit()
+            return cuenta_id
+        finally:
+            self.release_connection(conn)
 
     def obtener_cuentas(self, tipo=None, estado=None):
         conn = self.get_connection()
-        query = "SELECT * FROM cuentas_por_pagar_cobrar WHERE 1=1"
-        params = []
-        if tipo:
-            query += " AND tipo = %s"
-            params.append(tipo)
-        if estado:
-            query += " AND estado = %s"
-            params.append(estado)
-        query += " ORDER BY fecha_vencimiento ASC"
-        df = pd.read_sql_query(query, conn, params=params)
-        self.release_connection(conn)
-        return df
+        try:
+            query = "SELECT * FROM cuentas_por_pagar_cobrar WHERE 1=1"
+            params = []
+            if tipo:
+                query += " AND tipo = %s"
+                params.append(tipo)
+            if estado:
+                query += " AND estado = %s"
+                params.append(estado)
+            query += " ORDER BY fecha_vencimiento ASC"
+            df = pd.read_sql_query(query, conn, params=params)
+            return df
+        finally:
+            self.release_connection(conn)
 
     def marcar_cuenta_pagada(self, cuenta_id):
         conn = self.get_connection()
-        cursor = conn.cursor()
-        hoy = (datetime.now() - timedelta(hours=5)).strftime('%Y-%m-%d')
-        cursor.execute("UPDATE cuentas_por_pagar_cobrar SET estado = 'Pagado', fecha_pago = %s WHERE id = %s",
-                       (hoy, cuenta_id))
-        conn.commit()
-        self.release_connection(conn)
+        try:
+            cursor = conn.cursor()
+            hoy = (datetime.now() - timedelta(hours=5)).strftime('%Y-%m-%d')
+            cursor.execute("UPDATE cuentas_por_pagar_cobrar SET estado = 'Pagado', fecha_pago = %s WHERE id = %s",
+                           (hoy, cuenta_id))
+            conn.commit()
+        finally:
+            self.release_connection(conn)
 
     def eliminar_cuenta(self, cuenta_id):
         conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM cuentas_por_pagar_cobrar WHERE id = %s", (cuenta_id,))
-        conn.commit()
-        self.release_connection(conn)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM cuentas_por_pagar_cobrar WHERE id = %s", (cuenta_id,))
+            conn.commit()
+        finally:
+            self.release_connection(conn)
 
 
 # ==================== CLASES DE DATOS ====================
@@ -1939,17 +2027,29 @@ def main():
     # ==================== TAB 1: TRACTOMULAS ====================
     if tab_actual == opciones_tabs[1]:
         st.header("Tus Tractomulas")
+
+        # ---------------------------------------------------------------
+        # CORREGIDO v4.5: el selectbox que decide si se muestra el campo
+        # "Placa manual" ahora vive FUERA del form. Dentro de un st.form,
+        # ningún widget dispara un rerun hasta el submit, así que el
+        # text_input de placa manual se creaba recién en el mismo instante
+        # del submit y llegaba vacío (por eso "no se guardaba" la
+        # tractomula nueva). Al sacarlo del form, el campo aparece de
+        # inmediato al elegir "(Escribir nueva)" y su valor sí llega
+        # completo al momento de dar submit.
+        # ---------------------------------------------------------------
+        placas_opciones = ['(Escribir nueva)'] + sorted(PLACA_CONDUCTOR.keys())
+        placa_seleccion = st.selectbox("Placa", placas_opciones, key="tractomula_placa_sel")
+        if placa_seleccion == '(Escribir nueva)':
+            placa_ingresada = st.text_input("Placa manual", key="tractomula_placa_manual")
+            placa = placa_ingresada.strip().upper()
+        else:
+            placa = placa_seleccion
+
         with st.form(key="form_tractomula"):
             col1, col2 = st.columns(2)
             with col1:
-                placas_opciones = ['(Escribir nueva)'] + sorted(PLACA_CONDUCTOR.keys())
-                placa_seleccion = st.selectbox("Placa", placas_opciones)
-                if placa_seleccion == '(Escribir nueva)':
-                    placa_ingresada = st.text_input("Placa manual")
-                    placa = placa_ingresada.strip().upper()
-                else:
-                    placa = placa_seleccion
-
+                st.write(f"**Placa seleccionada:** {placa or '(sin definir)'}")
                 tipo = st.selectbox("Tipo", ["Sencilla", "Dobletroque", "Minimula", "Otro"])
             with col2:
                 consumo_km_galon = st.number_input("Consumo (km/galón)", min_value=0.0, value=2.5)
@@ -1963,6 +2063,8 @@ def main():
                     st.rerun()
                 else:
                     st.error(f"❌ La placa {placa} ya existe")
+            elif submit and not placa:
+                st.error("⚠️ Debes indicar una placa (selecciónala o escríbela arriba).")
 
         if st.session_state.tractomulas:
             st.subheader("Tractomulas Registradas")
@@ -2126,23 +2228,28 @@ def main():
                 "EDUARDO RAFAEL OLIVARES ALCAZAR": "486357159"
             }
 
+        # ---------------------------------------------------------------
+        # CORREGIDO v4.5: mismo bug que en Tab 1. El selectbox que decide
+        # si se muestra el campo "Nombre manual" ahora vive FUERA del
+        # form, para que el text_input aparezca de inmediato y su valor
+        # llegue completo al presionar "Agregar Conductor".
+        # ---------------------------------------------------------------
+        nombres_opciones = ['(Escribir nuevo)'] + sorted([n for n in PLACA_CONDUCTOR.values() if n])
+        nombre_seleccion = st.selectbox("Nombre", nombres_opciones, key="conductor_nombre_sel")
+        if nombre_seleccion == '(Escribir nuevo)':
+            nombre = st.text_input("Nombre manual", key="conductor_nombre_manual")
+            cedula_auto = ""
+        else:
+            nombre = nombre_seleccion
+            cedula_auto = st.session_state.conductores_cedulas.get(nombre, "")
+
         with st.form(key="form_conductor"):
-            col1, col2 = st.columns(2)
-            with col1:
-                nombres_opciones = ['(Escribir nuevo)'] + sorted([n for n in PLACA_CONDUCTOR.values() if n])
-                nombre_seleccion = st.selectbox("Nombre", nombres_opciones)
-                if nombre_seleccion == '(Escribir nuevo)':
-                    nombre = st.text_input("Nombre manual")
-                    cedula_auto = ""
-                else:
-                    nombre = nombre_seleccion
-                    cedula_auto = st.session_state.conductores_cedulas.get(nombre, "")
-            with col2:
-                if cedula_auto:
-                    cedula = st.text_input("Cédula", value=cedula_auto)
-                    st.info("📋 Cédula encontrada automáticamente")
-                else:
-                    cedula = st.text_input("Cédula")
+            st.write(f"**Nombre seleccionado:** {nombre or '(sin definir)'}")
+            if cedula_auto:
+                cedula = st.text_input("Cédula", value=cedula_auto)
+                st.info("📋 Cédula encontrada automáticamente")
+            else:
+                cedula = st.text_input("Cédula")
 
             submit = st.form_submit_button("Agregar Conductor")
             if submit and nombre and cedula:
@@ -2154,6 +2261,8 @@ def main():
                     st.rerun()
                 else:
                     st.error(f"❌ El conductor {nombre} ya existe")
+            elif submit and not nombre:
+                st.error("⚠️ Debes indicar un nombre (selecciónalo o escríbelo arriba).")
 
         if st.session_state.conductores:
             st.subheader("Conductores Registrados")
