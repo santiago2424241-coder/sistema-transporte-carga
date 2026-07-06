@@ -366,13 +366,13 @@ class DatabaseManager:
             query += " AND placa = %s"
             params.append(placa)
         if conductor:
-            query += " AND conductor LIKE %s"
+            query += " AND conductor ILIKE %s"
             params.append(f"%{conductor}%")
         if origen:
-            query += " AND origen LIKE %s"
+            query += " AND origen ILIKE %s"
             params.append(f"%{origen}%")
         if destino:
-            query += " AND destino LIKE %s"
+            query += " AND destino ILIKE %s"
             params.append(f"%{destino}%")
         query += " ORDER BY fecha_creacion DESC"
         df = pd.read_sql_query(query, conn, params=params)
@@ -960,9 +960,9 @@ class DatosColombia:
 
 # ==================== ASIGNACION DE CONDUCTORES ====================
 PLACA_CONDUCTOR = {
-    "NOX459": "HABID CAMACHO",
+    "NOX459": "GONZALO PINTO",
     "NOX460": "JOSE ORTEGA PEREZ",
-    "NOX461": "ISAAC TAFUR",
+    "NOX461": "ALVARO TAFUR",
     "SON047": "ISAIAS VESGA",
     "SON048": "FLAVIO ROSENDO MALTE TUTALCHA",
     "SOP148": "SLITH JOSE ORTEGA PACHECO",
@@ -976,6 +976,7 @@ PLACA_CONDUCTOR = {
     "UYQ308": "JULIAN CALETH CORONADO",
     "UYV084": "CARLOS TAFUR",
     "UYY788": "EDUARDO RAFAEL OLIVARES ALCAZAR",
+    "WLP822": "REIMUR VILLAMIL",
 }
 
 
@@ -1846,9 +1847,7 @@ def main():
 
         if 'conductores_cedulas' not in st.session_state:
             st.session_state.conductores_cedulas = {
-                "HABID CAMACHO": "123456789",
                 "JOSE ORTEGA PEREZ": "987654321",
-                "ISAAC TAFUR": "456789123",
                 "ISAIAS VESGA": "789123456",
                 "FLAVIO ROSENDO MALTE TUTALCHA": "321654987",
                 "SLITH JOSE ORTEGA PACHECO": "654987321",
