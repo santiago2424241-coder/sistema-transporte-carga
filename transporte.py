@@ -162,6 +162,9 @@ class DatabaseManager:
             # --- MIGRACIÓN: cliente (para trazabilidad por cliente) ---
             cursor.execute("ALTER TABLE viajes_v4 ADD COLUMN IF NOT EXISTS cliente TEXT")
 
+            # --- MIGRACIÓN: galones reales comprados (para detectar sobreconsumo vs el teórico) ---
+            cursor.execute("ALTER TABLE viajes_v4 ADD COLUMN IF NOT EXISTS galones_reales REAL")
+
             # Tabla de tractomulas
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS tractomulas (
@@ -250,11 +253,13 @@ class DatabaseManager:
         except Exception as e:
             st.error(f"Error inicializando base de datos: {e}")
 
-    def guardar_viaje(self, calculadora, fecha_viaje, observaciones="", cliente=""):
+    def guardar_viaje(self, calculadora, fecha_viaje, observaciones="", cliente="", galones_reales=None):
         """Guarda un viaje en la base de datos de forma segura con HORA COLOMBIA.
         fecha_viaje: fecha real en la que ocurrió el viaje (objeto date), distinta de
         fecha_creacion que es cuándo se registró en el sistema.
-        cliente: nombre del cliente/empresa para quien se hizo el flete (trazabilidad por cliente)."""
+        cliente: nombre del cliente/empresa para quien se hizo el flete (trazabilidad por cliente).
+        galones_reales: galones realmente comprados/cargados (opcional), para detectar sobreconsumo
+        comparándolo contra los galones_necesarios teóricos."""
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -263,6 +268,7 @@ class DatabaseManager:
             hora_colombia = datetime.now() - timedelta(hours=5)
             fecha_actual = hora_colombia.strftime('%Y-%m-%d %H:%M:%S')
             fecha_viaje_str = fecha_viaje.strftime('%Y-%m-%d') if fecha_viaje else fecha_actual[:10]
+            galones_reales_val = float(galones_reales) if galones_reales else None
 
             datos_viaje = (
                 fecha_actual,
@@ -309,6 +315,7 @@ class DatabaseManager:
                 float(calculadora.propina_comision),
                 fecha_viaje_str,
                 str(cliente),
+                galones_reales_val,
             )
 
             sql_insert = '''
@@ -321,13 +328,13 @@ class DatabaseManager:
                     total_gastos, legalizacion, punto_equilibrio, valor_flete,
                     utilidad, rentabilidad, anticipo, saldo, hubo_anticipo_empresa,
                     ant_empresa, saldo_empresa, observaciones,
-                    urea_acpm, transporte, propina_comision, fecha_viaje, cliente
+                    urea_acpm, transporte, propina_comision, fecha_viaje, cliente, galones_reales
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s
                 ) RETURNING id
             '''
 
@@ -402,7 +409,7 @@ class DatabaseManager:
         conn.commit()
         conn.close()
 
-    def actualizar_viaje(self, viaje_id, calculadora, fecha_viaje, observaciones="", cliente=""):
+    def actualizar_viaje(self, viaje_id, calculadora, fecha_viaje, observaciones="", cliente="", galones_reales=None):
         """Recalcula y actualiza un viaje ya guardado (edición desde Trazabilidad).
         No modifica fecha_creacion (fecha de registro original)."""
         try:
@@ -410,6 +417,7 @@ class DatabaseManager:
             cursor = conn.cursor()
             costos = calculadora.calcular_costos_totales()
             fecha_viaje_str = fecha_viaje.strftime('%Y-%m-%d') if fecha_viaje else None
+            galones_reales_val = float(galones_reales) if galones_reales else None
 
             cursor.execute('''
                 UPDATE viajes_v4 SET
@@ -424,7 +432,7 @@ class DatabaseManager:
                     utilidad = %s, rentabilidad = %s, anticipo = %s, saldo = %s,
                     hubo_anticipo_empresa = %s, ant_empresa = %s, saldo_empresa = %s,
                     observaciones = %s, urea_acpm = %s, transporte = %s, propina_comision = %s,
-                    fecha_viaje = %s, cliente = %s
+                    fecha_viaje = %s, cliente = %s, galones_reales = %s
                 WHERE id = %s
             ''', (
                 str(calculadora.tractomula.placa), str(calculadora.conductor.nombre),
@@ -442,7 +450,7 @@ class DatabaseManager:
                 float(calculadora.anticipo), costos['saldo'],
                 1 if calculadora.hubo_anticipo_empresa else 0, costos['ant_empresa'], costos['saldo_empresa'],
                 str(observaciones), float(calculadora.urea_acpm), float(calculadora.transporte),
-                float(calculadora.propina_comision), fecha_viaje_str, str(cliente), viaje_id
+                float(calculadora.propina_comision), fecha_viaje_str, str(cliente), galones_reales_val, viaje_id
             ))
             conn.commit()
             conn.close()
@@ -450,6 +458,30 @@ class DatabaseManager:
         except Exception as e:
             st.error(f"❌ Error al actualizar el viaje: {e}")
             return False
+
+    def obtener_viajes_con_consumo(self, placa=None):
+        """Trae los viajes que tienen galones_reales registrados, para comparar contra el
+        consumo teórico (galones_necesarios) y detectar sobreconsumo."""
+        conn = self.get_connection()
+        query = """
+            SELECT id, fecha_viaje, placa, conductor, origen, destino, distancia_km,
+                   galones_necesarios, galones_reales, combustible
+            FROM viajes_v4
+            WHERE galones_reales IS NOT NULL AND galones_reales > 0
+        """
+        params = []
+        if placa:
+            query += " AND placa = %s"
+            params.append(placa)
+        query += " ORDER BY fecha_viaje DESC"
+        df = pd.read_sql_query(query, conn, params=params)
+        conn.close()
+        if not df.empty:
+            df['diferencia_galones'] = df['galones_reales'] - df['galones_necesarios']
+            df['porcentaje_sobreconsumo'] = (
+                df['diferencia_galones'] / df['galones_necesarios'] * 100
+            ).where(df['galones_necesarios'] != 0, 0)
+        return df
 
     def obtener_estadisticas(self):
         conn = self.get_connection()
@@ -1533,7 +1565,7 @@ def main():
 - Punto de equilibrio: Valor Flete x {int(datos.PUNTO_EQUILIBRIO_PORCENTAJE*100)}%
         """)
 
-    tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+    tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
         "📊 Dashboard",
         "1. Tractomulas",
         "2. Rutas",
@@ -1543,7 +1575,8 @@ def main():
         "6. 📂 Trazabilidad",
         "7. Acumulado por Flota",
         "8. 💵 Liquidaciones",
-        "9. ⏰ Cuentas Pendientes"
+        "9. ⏰ Cuentas Pendientes",
+        "10. ⛽ Sobreconsumo"
     ])
 
     # ==================== TAB 0: DASHBOARD ====================
@@ -2019,6 +2052,17 @@ def main():
                     anticipo = limpiar_numero(anticipo_texto)
                     if anticipo > 0:
                         st.caption(f"💵 {formatear_numero(anticipo)}")
+                with col2:
+                    galones_reales = st.number_input(
+                        "⛽ Galones Reales Comprados (opcional)",
+                        min_value=0.0, value=0.0, step=1.0,
+                        help="Si registras cuánto combustible compraste realmente, el sistema podrá detectar sobreconsumo comparándolo contra el galonaje teórico (Pestaña ⛽ Sobreconsumo)."
+                    )
+                    galones_teoricos_preview = (
+                        ruta_obj.distancia_km / tractomula_obj.consumo_km_galon
+                        if tractomula_obj.consumo_km_galon > 0 else 0
+                    )
+                    st.caption(f"📐 Teórico para esta ruta: {formatear_decimal(galones_teoricos_preview)} gal")
 
                 st.divider()
                 st.subheader("💰 Valor del Flete")
@@ -2078,7 +2122,7 @@ def main():
                         st.session_state.calculadoras.append(calculadora)
 
                         if guardar:
-                            viaje_id = db.guardar_viaje(calculadora, fecha_viaje, observaciones, cliente_viaje)
+                            viaje_id = db.guardar_viaje(calculadora, fecha_viaje, observaciones, cliente_viaje, galones_reales)
                             if viaje_id:
                                 costos = calculadora.calcular_costos_totales()
                                 utilidad = costos.get('utilidad', 0)
@@ -2395,6 +2439,13 @@ def main():
                             edit_cliente = st.text_input(
                                 "🏢 Cliente", value=(viaje[44] if len(viaje) > 44 and viaje[44] else ""), key="edit_cliente"
                             )
+                            edit_galones_reales = st.number_input(
+                                "⛽ Galones Reales Comprados (opcional)",
+                                min_value=0.0,
+                                value=float(viaje[45]) if len(viaje) > 45 and viaje[45] else 0.0,
+                                step=1.0,
+                                key="edit_galones_reales"
+                            )
                             edit_observaciones = st.text_area("Observaciones", value=viaje[39] if viaje[39] else "", key="edit_obs")
 
                             col_guardar, col_cancelar = st.columns(2)
@@ -2411,7 +2462,7 @@ def main():
                                         edit_transporte, edit_propina, edit_cargue, edit_otros,
                                         edit_valor_flete, edit_anticipo, edit_hubo_ant_empresa, datos
                                     )
-                                    exito = db.actualizar_viaje(viaje_id_seleccionado, calculadora_editada, edit_fecha_viaje, edit_observaciones, edit_cliente)
+                                    exito = db.actualizar_viaje(viaje_id_seleccionado, calculadora_editada, edit_fecha_viaje, edit_observaciones, edit_cliente, edit_galones_reales)
                                     if exito:
                                         st.success("✅ Viaje actualizado correctamente")
                                         del st.session_state.editando_viaje_id
@@ -2769,6 +2820,94 @@ def main():
                             db.eliminar_cuenta(cuenta['id'])
                             st.success("Cuenta eliminada")
                             st.rerun()
+
+    # ==================== TAB 10: SOBRECONSUMO DE COMBUSTIBLE ====================
+    with tab10:
+        st.header("⛽ Detección de Sobreconsumo de Combustible")
+        st.caption("Compara los galones que TEÓRICAMENTE debió gastar cada viaje (según distancia y rendimiento) contra los galones REALES que compraste. Solo aparecen aquí los viajes donde registraste el dato real.")
+
+        st.info("💡 Para que un viaje aparezca acá, debes ingresar el campo **⛽ Galones Reales Comprados** al calcular el viaje (Tab 4) o al editarlo (Tab 6).")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            placa_filtro_consumo = st.selectbox("Filtrar por placa", ["Todas"] + sorted(PLACA_CONDUCTOR.keys()), key="filtro_consumo_placa")
+        with col2:
+            umbral_alerta = st.slider("Umbral de alerta de sobreconsumo (%)", min_value=5, max_value=50, value=10, step=5,
+                                       help="Viajes con un % de sobreconsumo mayor a este valor se marcan en rojo")
+
+        placa_f_consumo = None if placa_filtro_consumo == "Todas" else placa_filtro_consumo
+        df_consumo = db.obtener_viajes_con_consumo(placa_f_consumo)
+
+        if df_consumo.empty:
+            st.info("No hay viajes con galones reales registrados todavía.")
+        else:
+            total_viajes_consumo = len(df_consumo)
+            total_sobreconsumo = len(df_consumo[df_consumo['porcentaje_sobreconsumo'] > umbral_alerta])
+            galones_extra_total = df_consumo[df_consumo['diferencia_galones'] > 0]['diferencia_galones'].sum()
+            costo_extra_estimado = galones_extra_total * datos.PRECIO_DIESEL
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("🚛 Viajes Analizados", total_viajes_consumo)
+            with col2:
+                st.metric("🔴 Viajes con Sobreconsumo", total_sobreconsumo)
+            with col3:
+                st.metric("💸 Costo Extra Estimado", f"${formatear_numero(costo_extra_estimado)}",
+                          help="Galones de más x precio del diesel actual")
+
+            st.divider()
+
+            for _, v in df_consumo.iterrows():
+                porcentaje = v['porcentaje_sobreconsumo']
+                if porcentaje > umbral_alerta:
+                    icono = "🔴"
+                elif porcentaje > 0:
+                    icono = "🟡"
+                else:
+                    icono = "🟢"
+
+                titulo = (f"{icono} {v['placa']} | {v['conductor']} | {v['fecha_viaje']} | "
+                          f"{v['origen']} → {v['destino']} | Sobreconsumo: {porcentaje:.1f}%")
+
+                with st.expander(titulo):
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.write(f"**Placa:** {v['placa']}")
+                        st.write(f"**Conductor:** {v['conductor']}")
+                        st.write(f"**Ruta:** {v['origen']} → {v['destino']} ({formatear_numero(v['distancia_km'])} km)")
+                    with col2:
+                        st.write(f"**Galones Teóricos:** {formatear_decimal(v['galones_necesarios'])} gal")
+                        st.write(f"**Galones Reales:** {formatear_decimal(v['galones_reales'])} gal")
+                        st.write(f"**Diferencia:** {formatear_decimal(v['diferencia_galones'])} gal")
+                    with col3:
+                        if porcentaje > umbral_alerta:
+                            st.error(f"🔴 Sobreconsumo: {porcentaje:.1f}%")
+                        elif porcentaje > 0:
+                            st.warning(f"🟡 Leve diferencia: {porcentaje:.1f}%")
+                        else:
+                            st.success(f"🟢 Dentro de lo normal: {porcentaje:.1f}%")
+
+                        if v['diferencia_galones'] > 0:
+                            costo_extra_viaje = v['diferencia_galones'] * datos.PRECIO_DIESEL
+                            st.caption(f"💸 Costo extra: ${formatear_numero(costo_extra_viaje)}")
+
+                    if st.button("🗑️ Eliminar este viaje", key=f"eliminar_consumo_{v['id']}"):
+                        db.eliminar_viaje(int(v['id']))
+                        st.success("Viaje eliminado")
+                        st.rerun()
+
+            st.divider()
+            st.subheader("📊 Tabla Completa")
+            df_mostrar_consumo = df_consumo.copy()
+            df_mostrar_consumo['galones_necesarios'] = df_mostrar_consumo['galones_necesarios'].apply(lambda x: formatear_decimal(x))
+            df_mostrar_consumo['galones_reales'] = df_mostrar_consumo['galones_reales'].apply(lambda x: formatear_decimal(x))
+            df_mostrar_consumo['diferencia_galones'] = df_mostrar_consumo['diferencia_galones'].apply(lambda x: formatear_decimal(x))
+            df_mostrar_consumo['porcentaje_sobreconsumo'] = df_mostrar_consumo['porcentaje_sobreconsumo'].apply(lambda x: f"{x:.1f}%")
+            df_mostrar_consumo = df_mostrar_consumo[['id', 'fecha_viaje', 'placa', 'conductor', 'origen', 'destino',
+                                                       'galones_necesarios', 'galones_reales', 'diferencia_galones', 'porcentaje_sobreconsumo']]
+            df_mostrar_consumo.columns = ['ID', 'Fecha', 'Placa', 'Conductor', 'Origen', 'Destino',
+                                            'Gal. Teórico', 'Gal. Real', 'Diferencia', '% Sobreconsumo']
+            st.dataframe(df_mostrar_consumo, use_container_width=True, hide_index=True)
 
 
 if __name__ == "__main__":
