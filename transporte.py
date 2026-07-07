@@ -19,6 +19,14 @@ CAMBIOS EN ESTA VERSIÓN (v4.6 - FLUIDEZ DE NAVEGACIÓN Y LISTAS):
   resultado en session_state de forma explícita en vez de mezclar la
   condición del botón con "not in session_state", evitando que el resultado
   visible quede un rerun "atrasado" respecto al filtro que se ve en pantalla.
+
+CAMBIOS EN ESTA VERSIÓN (v4.7 - CONTEO REAL DE VIAJES POR numero_viajes):
+- CORREGIDO: en Dashboard, Estadísticas Generales, Trazabilidad y
+  Liquidaciones, el conteo de "cuántos viajes hizo" un conductor/tractomula/
+  ruta ahora SUMA el campo numero_viajes de cada registro, en vez de contar
+  filas (COUNT(*) / len(df)). Esto aplica para CUALQUIER cliente, no solo
+  AGOFER: si registras un solo viaje con Número de Viajes = 3, ahora cuenta
+  como 3 viajes en todos los reportes, no como 1.
 """
 
 import streamlit as st
@@ -519,17 +527,17 @@ class DatabaseManager:
         stats = {}
         try:
             cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM viajes_v4")
+            cursor.execute("SELECT COALESCE(SUM(numero_viajes),0) FROM viajes_v4")
             stats['total_viajes'] = cursor.fetchone()[0]
             cursor.execute("SELECT SUM(distancia_km) FROM viajes_v4")
             stats['total_km'] = cursor.fetchone()[0] or 0
             cursor.execute("SELECT SUM(total_gastos) FROM viajes_v4")
             stats['total_gastos'] = cursor.fetchone()[0] or 0
-            cursor.execute("SELECT placa, COUNT(*) as total FROM viajes_v4 GROUP BY placa ORDER BY total DESC")
+            cursor.execute("SELECT placa, COALESCE(SUM(numero_viajes),0) as total FROM viajes_v4 GROUP BY placa ORDER BY total DESC")
             stats['viajes_por_placa'] = cursor.fetchall()
-            cursor.execute("SELECT conductor, COUNT(*) as total FROM viajes_v4 GROUP BY conductor ORDER BY total DESC")
+            cursor.execute("SELECT conductor, COALESCE(SUM(numero_viajes),0) as total FROM viajes_v4 GROUP BY conductor ORDER BY total DESC")
             stats['viajes_por_conductor'] = cursor.fetchall()
-            cursor.execute("SELECT origen, destino, COUNT(*) as total FROM viajes_v4 GROUP BY origen, destino ORDER BY total DESC LIMIT 5")
+            cursor.execute("SELECT origen, destino, COALESCE(SUM(numero_viajes),0) as total FROM viajes_v4 GROUP BY origen, destino ORDER BY total DESC LIMIT 5")
             stats['rutas_frecuentes'] = cursor.fetchall()
         except Exception:
             stats = {'total_viajes': 0, 'total_km': 0, 'total_gastos': 0, 'viajes_por_placa': [], 'viajes_por_conductor': [], 'rutas_frecuentes': []}
@@ -546,7 +554,7 @@ class DatabaseManager:
         try:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT COUNT(*) as total_viajes, SUM(distancia_km) as total_km,
+                SELECT COALESCE(SUM(numero_viajes),0) as total_viajes, SUM(distancia_km) as total_km,
                        SUM(total_gastos) as total_gastos, SUM(valor_flete) as total_ingresos,
                        SUM(utilidad) as total_utilidad, AVG(utilidad) as utilidad_promedio
                 FROM viajes_v4
@@ -563,7 +571,7 @@ class DatabaseManager:
             }
 
             cursor.execute("""
-                SELECT placa, COUNT(*) as viajes, SUM(total_gastos) as gastos,
+                SELECT placa, COALESCE(SUM(numero_viajes),0) as viajes, SUM(total_gastos) as gastos,
                        SUM(valor_flete) as ingresos, SUM(utilidad) as utilidad
                 FROM viajes_v4
                 WHERE fecha_viaje >= %s
@@ -572,7 +580,7 @@ class DatabaseManager:
             data['por_tractomula'] = cursor.fetchall()
 
             cursor.execute("""
-                SELECT conductor, COUNT(*) as viajes, SUM(utilidad) as utilidad,
+                SELECT conductor, COALESCE(SUM(numero_viajes),0) as viajes, SUM(utilidad) as utilidad,
                        AVG(utilidad) as utilidad_promedio
                 FROM viajes_v4
                 WHERE fecha_viaje >= %s
@@ -581,7 +589,7 @@ class DatabaseManager:
             data['por_conductor'] = cursor.fetchall()
 
             cursor.execute("""
-                SELECT origen, destino, COUNT(*) as viajes, AVG(utilidad) as utilidad_promedio,
+                SELECT origen, destino, COALESCE(SUM(numero_viajes),0) as viajes, AVG(utilidad) as utilidad_promedio,
                        SUM(utilidad) as utilidad_total
                 FROM viajes_v4
                 WHERE fecha_viaje >= %s
@@ -591,7 +599,7 @@ class DatabaseManager:
 
             cursor.execute("""
                 SELECT to_char(fecha_viaje, 'YYYY-MM') as mes,
-                       COUNT(*) as viajes, SUM(total_gastos) as gastos,
+                       COALESCE(SUM(numero_viajes),0) as viajes, SUM(total_gastos) as gastos,
                        SUM(valor_flete) as ingresos, SUM(utilidad) as utilidad
                 FROM viajes_v4
                 WHERE fecha_viaje >= CURRENT_DATE - INTERVAL '6 months'
@@ -864,7 +872,7 @@ class DatabaseManager:
         conn = self.get_connection()
         try:
             query = """
-                SELECT id, fecha_viaje, placa, origen, destino, comision_conductor
+                SELECT id, fecha_viaje, placa, origen, destino, comision_conductor, numero_viajes
                 FROM viajes_v4
                 WHERE conductor = %s AND fecha_viaje >= %s AND fecha_viaje <= %s
                 ORDER BY fecha_viaje
@@ -882,7 +890,7 @@ class DatabaseManager:
             total_comisiones = float(df_viajes['comision_conductor'].sum()) if not df_viajes.empty else 0.0
             total_a_pagar = total_comisiones
             viajes_incluidos = ",".join(str(i) for i in df_viajes['id'].tolist()) if not df_viajes.empty else ""
-            cantidad_viajes = len(df_viajes)
+            cantidad_viajes = int(df_viajes['numero_viajes'].fillna(1).sum()) if not df_viajes.empty else 0
             placas = ", ".join(sorted(df_viajes['placa'].unique())) if not df_viajes.empty else ""
 
             hora_colombia = datetime.now() - timedelta(hours=5)
@@ -1703,14 +1711,6 @@ def main():
         """)
 
     # ==================== NAVEGACIÓN PERSISTENTE (CORREGIDO v4.6) ====================
-    # ANTES: se reasignaba st.session_state.tab_actual = st.radio(...) en la
-    # misma línea donde se creaba el widget. Combinado con la latencia de red
-    # hacia Supabase que había en otras partes de la app, esto se sentía como
-    # si hubiera que hacer clic dos veces para que la pestaña cambiara.
-    # AHORA: se usa on_change con un callback dedicado, que actualiza
-    # st.session_state.tab_actual ANTES de que el script vuelva a correr de
-    # arriba a abajo. Así, en el mismo rerun que dispara el clic, tab_actual
-    # ya tiene el valor nuevo y el contenido correcto se muestra de inmediato.
     opciones_tabs = [
         "📊 Dashboard",
         "1. Tractomulas",
@@ -2418,11 +2418,6 @@ def main():
 
             buscar = st.button("🔍 Buscar", type="primary")
 
-        # CORREGIDO v4.6: se separa claramente "hay que buscar" (botón
-        # presionado o primera vez que se abre la pestaña) de "reutilizar lo
-        # último guardado", en vez de mezclar ambas condiciones en un solo if
-        # que dejaba el resultado un rerun atrasado respecto a los filtros
-        # visibles en pantalla.
         primera_vez = 'ultima_busqueda' not in st.session_state
         if buscar or primera_vez:
             fecha_ini = fecha_inicio.strftime('%Y-%m-%d') if fecha_inicio else None
@@ -2445,7 +2440,8 @@ def main():
 
             col1, col2, col3, col4 = st.columns(4)
             with col1:
-                st.metric("Total Viajes", len(df_viajes))
+                st.metric("Total Viajes", int(df_viajes['numero_viajes'].fillna(1).sum()))
+                st.caption(f"({len(df_viajes)} registros)")
             with col2:
                 st.metric("Kilómetros", f"{formatear_numero(df_viajes['distancia_km'].sum())} km")
             with col3:
@@ -2886,10 +2882,10 @@ def main():
 
             df_mostrar_liq = df_viajes_liq.copy()
             df_mostrar_liq['comision_conductor'] = df_mostrar_liq['comision_conductor'].apply(lambda x: f"${formatear_numero(x)}")
-            df_mostrar_liq.columns = ['ID', 'Fecha Viaje', 'Placa', 'Origen', 'Destino', 'Comisión']
+            df_mostrar_liq.columns = ['ID', 'Fecha Viaje', 'Placa', 'Origen', 'Destino', 'Comisión', 'N° Viajes']
             st.dataframe(df_mostrar_liq, use_container_width=True, hide_index=True)
 
-            cantidad_viajes_preview = len(df_viajes_liq)
+            cantidad_viajes_preview = int(df_viajes_liq['numero_viajes'].fillna(1).sum())
             placas_preview = ", ".join(sorted(df_viajes_liq['placa'].unique()))
             total_comisiones_preview = float(df_viajes_liq['comision_conductor'].sum())
 
