@@ -1,95 +1,24 @@
 """
 Sistema de Programación de Rutas y Cálculo de Costos para Tractomulas
-Versión 4.5 - Conectado a Supabase (PostgreSQL) - ACTUALIZADO
+Versión 4.6 - Conectado a Supabase (PostgreSQL) - ACTUALIZADO
 Contexto: Colombia
 Autor: Sistema de Gestión de Transporte de Carga
 
-CAMBIOS EN ESTA VERSIÓN (v4.0):
-- Comisión conductor actualizada: Urbano ahora es $120.000 x días (antes fijo $100.000),
-  Frontera $565.000 (antes $500.000), Regional $200.000 (antes $180.000),
-  Aguachica $360.000 (antes $350.000), NUEVA categoría Riohacha $350.000
-- Nuevos conceptos de gasto variable: Urea y/o ACPM, Transporte, Propina/Comisión
-- Punto de Equilibrio = Valor del Flete x 40% (antes Total Gastos / 0.5)
-- Legalización y Total Gastos incluyen los 3 conceptos nuevos
-- Las rutas ahora guardan valores por defecto para los gastos variables
-  (Flypass, Peajes, Urea/ACPM, Hotel, Comida, Transporte, Propina/Comisión,
-  Cargue/Descargue, Otros) para no tener que escribirlos en cada viaje
-- CORREGIDO: bug de diciembre en filtro de fechas (Tab 7)
-- CORREGIDO: guardar_ruta ahora sí devuelve el ID (usa RETURNING id)
-- CORREGIDO: se eliminaron las 3 definiciones duplicadas de obtener_rutas()
-
-CAMBIOS EN ESTA VERSIÓN (v4.1 - OPTIMIZACIÓN DE RENDIMIENTO):
-- NUEVO: Pool de conexiones (psycopg2.pool) cacheado con st.cache_resource,
-  en vez de abrir/cerrar una conexión nueva a Supabase en cada consulta.
-  Esto reduce drásticamente la latencia de guardar/consultar/filtrar.
-- NUEVO: init_database() ya no se re-ejecuta en cada sesión/usuario (se
-  controla con una bandera global a nivel de proceso).
-- NUEVO: se eliminó la consulta duplicada a la tabla `rutas` en el Tab 2.
-- NUEVO: cache de 20-30s para las consultas pesadas del Dashboard y de
-  Totales por Flota, para no recalcularlas en cada rerun de Streamlit.
-- RECOMENDADO (ejecutar una sola vez en el SQL Editor de Supabase):
-    CREATE INDEX IF NOT EXISTS idx_viajes_fecha_viaje ON viajes_v4 (fecha_viaje);
-    CREATE INDEX IF NOT EXISTS idx_viajes_placa ON viajes_v4 (placa);
-    CREATE INDEX IF NOT EXISTS idx_viajes_conductor ON viajes_v4 (conductor);
-    CREATE EXTENSION IF NOT EXISTS pg_trgm;
-    CREATE INDEX IF NOT EXISTS idx_viajes_conductor_trgm ON viajes_v4 USING gin (conductor gin_trgm_ops);
-    CREATE INDEX IF NOT EXISTS idx_viajes_origen_trgm ON viajes_v4 USING gin (origen gin_trgm_ops);
-    CREATE INDEX IF NOT EXISTS idx_viajes_destino_trgm ON viajes_v4 USING gin (destino gin_trgm_ops);
-    CREATE INDEX IF NOT EXISTS idx_viajes_cliente_trgm ON viajes_v4 USING gin (cliente gin_trgm_ops);
-
-CAMBIOS EN ESTA VERSIÓN (v4.2):
-- NUEVO: Campo "Número de Viajes" en el Cálculo de Viaje (Tab 4) y en la
-  Edición de Viaje (Tab 6). Representa cuántos viajes hizo el conductor
-  ese día.
-- CAMBIO DE FÓRMULA: Comisión Conductor Urbano/Normal ahora es
-  $120.000 x NÚMERO DE VIAJES (antes era $120.000 x días de viaje).
-  Las demás comisiones (Regional, Aguachica, Riohacha, Frontera) siguen
-  siendo fijas, sin cambios.
-
-CAMBIOS EN ESTA VERSIÓN (v4.3 - AUTOMATIZACIÓN CLIENTE AGOFER / URBANO):
-- NUEVO: Campo "Peso (kg)" en el Cálculo de Viaje (Tab 4) y en la Edición
-  de Viaje (Tab 6).
-- NUEVO: Para rutas URBANAS (no frontera, no regional, no Aguachica, no
-  Riohacha) con Cliente = "AGOFER" (sin importar mayúsculas/espacios):
-    * VALOR DEL FLETE se autocalcula = Peso (kg) x 27.500 x Número de Viajes
-    * CARGUE/DESCARGUE - AMARRE/DESAMARRE se autocalcula = 30.000 x Número de Viajes
-    * La distancia recorrida real del día = Distancia de la Ruta x Número
-      de Viajes, y esa distancia (no la de la ruta sola) es la que se usa
-      para calcular Llantas, Aceite, Combustible/Galones, y la que queda
-      guardada en el historial (Trazabilidad) como "Distancia" del viaje.
-  Todos estos valores autocalculados SIGUEN SIENDO EDITABLES: se
-  precargan en el campo pero el usuario puede corregirlos a mano si un
-  viaje particular es distinto.
-- NUEVO: se guarda el campo "peso" en la base de datos (columna nueva en
-  viajes_v4), visible también en Trazabilidad.
-
-CAMBIOS EN ESTA VERSIÓN (v4.4 - NAVEGACIÓN PERSISTENTE):
-- CORREGIDO: al guardar cualquier registro (tractomula, ruta, conductor,
-  viaje, liquidación, cuenta) y hacer st.rerun(), la app ya NO te regresa
-  al Dashboard. Se reemplazó st.tabs() (que no conserva la pestaña activa
-  entre reruns) por una navegación manual basada en st.session_state.
-
-CAMBIOS EN ESTA VERSIÓN (v4.5 - FIXES DE ESTABILIDAD Y RENDIMIENTO):
-- CORREGIDO (BUG CRÍTICO): en los formularios de Tractomulas (Tab 1) y
-  Conductores (Tab 3), el campo de texto "(Escribir nueva/nuevo)" estaba
-  DENTRO de un st.form(). En Streamlit, los widgets dentro de un form no
-  disparan un rerun hasta que se presiona el botón de submit, así que ese
-  campo de texto se creaba recién en el mismo instante del submit y
-  llegaba vacío. Por eso "no se guardaba" el conductor/tractomula nueva.
-  SOLUCIÓN: el selectbox que decide si hay que mostrar el campo manual
-  ahora vive FUERA del form, y el form solo contiene el resto de campos.
-- CORREGIDO (BUG CRÍTICO - LENTITUD / CONGELAMIENTO): casi todos los
-  métodos de DatabaseManager tomaban una conexión del pool
-  (self.get_connection()) pero solo la devolvían (self.release_connection)
-  si NO había ningún error. Si una consulta fallaba por cualquier motivo,
-  la conexión quedaba "perdida" para siempre (nunca volvía al pool). Como
-  el pool tiene un máximo de conexiones, después de suficientes fallos el
-  pool se agotaba y la app se quedaba colgada esperando una conexión libre
-  al cambiar de pestaña o hacer cualquier consulta. SOLUCIÓN: todos los
-  métodos ahora usan try/finally para GARANTIZAR que la conexión siempre
-  se devuelva al pool, haya o no haya error.
-- NUEVO: se subió el tamaño máximo del pool de conexiones de 10 a 20, para
-  dar más margen mientras la app tiene picos de uso concurrente.
+CAMBIOS EN ESTA VERSIÓN (v4.6 - FLUIDEZ DE NAVEGACIÓN Y LISTAS):
+- CORREGIDO: la navegación por pestañas (radio superior) ahora usa
+  on_change con un callback en vez de reasignar st.session_state.tab_actual
+  en la misma línea donde se crea el widget. Esto evita que haya que hacer
+  clic dos veces para que el contenido de la pestaña cambie.
+- NUEVO: las listas de Tractomulas, Conductores y Rutas ahora se cargan con
+  funciones envueltas en @st.cache_data (TTL 30s), y se invalida el cache
+  explícitamente (.clear()) justo después de guardar/eliminar cualquiera de
+  ellas. Antes se releían de la base de datos en cada rerun sin cache,
+  sumando latencia de red a cada clic (incluido el propio cambio de pestaña).
+- NUEVO: los combos "Filtrar / Buscar" de Trazabilidad (Tab 6), Acumulado
+  por Flota (Tab 7) y Liquidaciones (Tab 8) ahora guardan y reutilizan el
+  resultado en session_state de forma explícita en vez de mezclar la
+  condición del botón con "not in session_state", evitando que el resultado
+  visible quede un rerun "atrasado" respecto al filtro que se ve en pantalla.
 """
 
 import streamlit as st
@@ -121,19 +50,12 @@ except:
 SUPABASE_DB_URL = "postgresql://postgres.wiomyjrmsrhcgvhgkbqe:Conejito800$@aws-1-us-west-2.pooler.supabase.com:6543/postgres"
 
 
-# ==================== POOL DE CONEXIONES (NUEVO v4.1, ampliado v4.5) ====================
-# Se cachea a nivel de proceso con st.cache_resource: todas las sesiones de
-# Streamlit reutilizan el mismo pool de conexiones ya abiertas, en vez de
-# abrir/cerrar una conexión TCP+TLS nueva contra Supabase en cada consulta.
-# v4.5: máximo subido de 10 a 20 conexiones como margen adicional, además de
-# la corrección de fugas de conexión (ver DatabaseManager).
+# ==================== POOL DE CONEXIONES ====================
 @st.cache_resource
 def get_db_pool():
     return pg_pool.ThreadedConnectionPool(1, 20, SUPABASE_DB_URL)
 
 
-# Bandera global (a nivel de proceso) para no re-correr las migraciones
-# ALTER TABLE / CREATE TABLE en cada usuario/sesión nueva.
 _db_initialized = False
 
 
@@ -174,10 +96,7 @@ def limpiar_numero(texto):
 
 
 def es_cliente_agofer(cliente: str) -> bool:
-    """NUEVO v4.3: normaliza el nombre del cliente (mayúsculas, sin espacios
-    sobrantes) para detectar si corresponde al cliente 'AGOFER', sin
-    importar cómo lo haya escrito el usuario (mayúsculas/minúsculas,
-    espacios al inicio/final)."""
+    """Normaliza el nombre del cliente para detectar si corresponde a 'AGOFER'."""
     if not cliente:
         return False
     return str(cliente).strip().upper() == "AGOFER"
@@ -185,18 +104,7 @@ def es_cliente_agofer(cliente: str) -> bool:
 
 # ==================== BASE DE DATOS SUPABASE ====================
 class DatabaseManager:
-    """Gestor de base de datos Supabase (PostgreSQL) para trazabilidad.
-
-    v4.1: usa un pool de conexiones cacheado (get_db_pool) en vez de abrir
-    una conexión nueva en cada método. get_connection() toma una conexión
-    prestada del pool y release_connection() la devuelve para que se
-    reutilice en la siguiente consulta.
-
-    v4.5: TODOS los métodos ahora usan try/finally alrededor de
-    get_connection()/release_connection() para garantizar que la conexión
-    SIEMPRE se devuelva al pool, incluso si la consulta falla. Antes, un
-    error a mitad de una consulta dejaba la conexión "perdida" para
-    siempre, y con el tiempo el pool se agotaba y la app se colgaba."""
+    """Gestor de base de datos Supabase (PostgreSQL) para trazabilidad."""
 
     def __init__(self):
         self.pool = get_db_pool()
@@ -206,8 +114,6 @@ class DatabaseManager:
         return self.pool.getconn()
 
     def release_connection(self, conn):
-        """Devuelve la conexión al pool en vez de cerrarla, para que se
-        reutilice en la siguiente consulta."""
         try:
             self.pool.putconn(conn)
         except Exception:
@@ -217,9 +123,6 @@ class DatabaseManager:
                 pass
 
     def init_database(self):
-        """Crea las tablas si no existen y migra columnas nuevas (Sintaxis PostgreSQL).
-        v4.1: solo se ejecuta una vez por proceso (bandera _db_initialized),
-        para no repetir ~20 ALTER TABLE en cada sesión de usuario nueva."""
         global _db_initialized
         if _db_initialized:
             return
@@ -228,7 +131,6 @@ class DatabaseManager:
             conn = self.get_connection()
             cursor = conn.cursor()
 
-            # Tabla Viajes v4
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS viajes_v4 (
                     id SERIAL PRIMARY KEY,
@@ -274,32 +176,21 @@ class DatabaseManager:
                 )
             ''')
 
-            # --- MIGRACIÓN: nuevas columnas para conceptos nuevos ---
             cursor.execute("ALTER TABLE viajes_v4 ADD COLUMN IF NOT EXISTS urea_acpm REAL DEFAULT 0")
             cursor.execute("ALTER TABLE viajes_v4 ADD COLUMN IF NOT EXISTS transporte REAL DEFAULT 0")
             cursor.execute("ALTER TABLE viajes_v4 ADD COLUMN IF NOT EXISTS propina_comision REAL DEFAULT 0")
 
-            # --- MIGRACIÓN: fecha real del viaje (distinta de fecha_creacion, que es cuándo se registró) ---
             cursor.execute("ALTER TABLE viajes_v4 ADD COLUMN IF NOT EXISTS fecha_viaje DATE")
-            # Para viajes ya guardados sin fecha_viaje, se rellena con la fecha de creación como aproximación
             cursor.execute("""
                 UPDATE viajes_v4 SET fecha_viaje = to_date(fecha_creacion, 'YYYY-MM-DD')
                 WHERE fecha_viaje IS NULL
             """)
 
-            # --- MIGRACIÓN: cliente (para trazabilidad por cliente) ---
             cursor.execute("ALTER TABLE viajes_v4 ADD COLUMN IF NOT EXISTS cliente TEXT")
-
-            # --- MIGRACIÓN: galones reales comprados (para detectar sobreconsumo vs el teórico) ---
             cursor.execute("ALTER TABLE viajes_v4 ADD COLUMN IF NOT EXISTS galones_reales REAL")
-
-            # --- MIGRACIÓN (v4.2): número de viajes del día (para la comisión urbana) ---
             cursor.execute("ALTER TABLE viajes_v4 ADD COLUMN IF NOT EXISTS numero_viajes INTEGER DEFAULT 1")
-
-            # --- MIGRACIÓN (v4.3): peso transportado (kg), usado en la fórmula de flete Agofer ---
             cursor.execute("ALTER TABLE viajes_v4 ADD COLUMN IF NOT EXISTS peso REAL DEFAULT 0")
 
-            # Tabla de tractomulas
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS tractomulas (
                     id SERIAL PRIMARY KEY,
@@ -309,7 +200,6 @@ class DatabaseManager:
                 )
             ''')
 
-            # Tabla de conductores
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS conductores (
                     id SERIAL PRIMARY KEY,
@@ -318,7 +208,6 @@ class DatabaseManager:
                 )
             ''')
 
-            # Tabla de rutas
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS rutas (
                     id SERIAL PRIMARY KEY,
@@ -331,7 +220,6 @@ class DatabaseManager:
                 )
             ''')
 
-            # --- MIGRACIÓN: nueva categoría Riohacha + valores por defecto de gastos variables ---
             cursor.execute("ALTER TABLE rutas ADD COLUMN IF NOT EXISTS es_riohacha INTEGER DEFAULT 0")
             cursor.execute("ALTER TABLE rutas ADD COLUMN IF NOT EXISTS default_flypass REAL DEFAULT 0")
             cursor.execute("ALTER TABLE rutas ADD COLUMN IF NOT EXISTS default_peajes REAL DEFAULT 0")
@@ -343,7 +231,6 @@ class DatabaseManager:
             cursor.execute("ALTER TABLE rutas ADD COLUMN IF NOT EXISTS default_cargue_descargue REAL DEFAULT 0")
             cursor.execute("ALTER TABLE rutas ADD COLUMN IF NOT EXISTS default_otros REAL DEFAULT 0")
 
-            # --- NUEVA TABLA: Liquidaciones de conductores (quincenas) ---
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS liquidaciones_conductor (
                     id SERIAL PRIMARY KEY,
@@ -365,7 +252,6 @@ class DatabaseManager:
             ''')
             cursor.execute("ALTER TABLE liquidaciones_conductor ADD COLUMN IF NOT EXISTS placas TEXT")
 
-            # --- NUEVA TABLA: Cuentas por pagar/cobrar con vencimientos ---
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS cuentas_por_pagar_cobrar (
                     id SERIAL PRIMARY KEY,
@@ -391,16 +277,6 @@ class DatabaseManager:
                 self.release_connection(conn)
 
     def guardar_viaje(self, calculadora, fecha_viaje, observaciones="", cliente=""):
-        """Guarda un viaje en la base de datos de forma segura con HORA COLOMBIA.
-        fecha_viaje: fecha real en la que ocurrió el viaje (objeto date), distinta de
-        fecha_creacion que es cuándo se registró en el sistema.
-        cliente: nombre del cliente/empresa para quien se hizo el flete (trazabilidad por cliente).
-
-        v4.3: la columna distancia_km ahora guarda la DISTANCIA EFECTIVA del
-        viaje (calculadora.distancia_efectiva), que para rutas urbanas del
-        cliente Agofer es distancia_ruta x numero_viajes; para los demás
-        casos es igual a la distancia de la ruta, como siempre. También se
-        guarda el peso (kg)."""
         conn = None
         try:
             conn = self.get_connection()
@@ -510,8 +386,6 @@ class DatabaseManager:
             self.release_connection(conn)
 
     def buscar_viajes(self, fecha_inicio=None, fecha_fin=None, placa=None, conductor=None, origen=None, destino=None, cliente=None):
-        """Filtra por fecha_viaje (fecha real en que ocurrió el viaje), no por fecha_creacion
-        (que es cuándo se registró en el sistema)."""
         conn = self.get_connection()
         try:
             query = "SELECT * FROM viajes_v4 WHERE 1=1"
@@ -563,10 +437,6 @@ class DatabaseManager:
             self.release_connection(conn)
 
     def actualizar_viaje(self, viaje_id, calculadora, fecha_viaje, observaciones="", cliente="", galones_reales=None):
-        """Recalcula y actualiza un viaje ya guardado (edición desde Trazabilidad).
-        No modifica fecha_creacion (fecha de registro original).
-        v4.3: distancia_km se actualiza con la distancia EFECTIVA (ver guardar_viaje)
-        y también se guarda el peso."""
         conn = None
         try:
             conn = self.get_connection()
@@ -620,8 +490,6 @@ class DatabaseManager:
                 self.release_connection(conn)
 
     def obtener_viajes_con_consumo(self, placa=None):
-        """Trae los viajes que tienen galones_reales registrados, para comparar contra el
-        consumo teórico (galones_necesarios) y detectar sobreconsumo."""
         conn = self.get_connection()
         try:
             query = """
@@ -763,7 +631,6 @@ class DatabaseManager:
         return data
 
     def obtener_totales_por_placa(self, fecha_inicio=None, fecha_fin=None):
-        """Obtiene totales acumulados por placa con filtros de fecha (incluye conceptos nuevos)"""
         conn = self.get_connection()
         try:
             query = """
@@ -795,7 +662,6 @@ class DatabaseManager:
             try:
                 df = pd.read_sql_query(query, conn, params=params)
                 if not df.empty:
-                    # TOTAL GASTOS = suma de todos los conceptos (incluye los 3 nuevos)
                     df['total_gastos'] = (
                         df['total_admin'] + df['total_parafiscales'] + df['total_comision'] +
                         df['total_mantenimiento'] + df['total_seguros'] + df['total_tecnomecanica'] +
@@ -805,13 +671,9 @@ class DatabaseManager:
                         df['total_transporte'] + df['total_parqueo'] + df['total_propina_comision'] +
                         df['total_cargue_descargue'] + df['total_otros']
                     )
-                    # PUNTO DE EQUILIBRIO = TOTAL CXC x 40%
                     df['total_punto_equilibrio'] = df['total_cxc'] * 0.40
-                    # UT TOTAL = TOTAL CXC - TOTAL GASTOS
                     df['total_ut'] = df['total_cxc'] - df['total_gastos']
-                    # RENTABILIDAD = UT TOTAL / TOTAL CXC (en %)
                     df['total_rentabilidad'] = (df['total_ut'] / df['total_cxc'] * 100).where(df['total_cxc'] != 0, 0)
-                    # SALDO = TOTAL ANTICIPOS - TOTAL LEGALIZACION
                     df['total_saldo'] = df['total_anticipos'] - df['total_legalizacion']
             except Exception:
                 df = pd.DataFrame()
@@ -898,10 +760,8 @@ class DatabaseManager:
         finally:
             self.release_connection(conn)
 
-    # ---------------- Métodos para rutas (CORREGIDOS) ----------------
+    # ---------------- Métodos para rutas ----------------
     def guardar_ruta(self, ruta):
-        """Guarda una ruta, incluye Riohacha y los valores por defecto de gastos variables.
-        CORREGIDO: ahora usa RETURNING id para devolver el ID correctamente."""
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
@@ -940,9 +800,6 @@ class DatabaseManager:
             self.release_connection(conn)
 
     def obtener_rutas(self):
-        """Obtiene rutas con columnas explícitas (incluye Riohacha y defaults).
-        CORREGIDO: se eliminaron las 2 definiciones duplicadas que existían antes;
-        esta es la única versión."""
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
@@ -980,9 +837,6 @@ class DatabaseManager:
             self.release_connection(conn)
 
     def obtener_rutas_con_id(self):
-        """NUEVO v4.1: trae (id, origen, destino, distancia_km, es_frontera, es_regional,
-        es_aguachica, es_riohacha) en una sola consulta, para no tener que volver a pegarle
-        a la tabla `rutas` en el Tab 2 solo para mostrar la lista con botón de eliminar."""
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
@@ -1007,7 +861,6 @@ class DatabaseManager:
 
     # ---------------- Métodos para Liquidaciones de Conductores ----------------
     def obtener_viajes_para_liquidar(self, conductor, periodo_inicio, periodo_fin):
-        """Trae los viajes de un conductor en un rango de fechas (por fecha_viaje real)"""
         conn = self.get_connection()
         try:
             query = """
@@ -1022,8 +875,6 @@ class DatabaseManager:
             self.release_connection(conn)
 
     def guardar_liquidacion(self, conductor, periodo_inicio, periodo_fin, df_viajes, observaciones=""):
-        """Calcula y guarda la liquidación de un conductor para un periodo (ej. quincena).
-        Total a Pagar = Total Comisiones (no se suma nómina ni se resta anticipo)."""
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
@@ -1171,8 +1022,7 @@ class Ruta:
     es_frontera: bool
     es_regional: bool = False
     es_aguachica: bool = False
-    es_riohacha: bool = False  # NUEVO
-    # Valores por defecto para gastos variables (se autocompletan al elegir la ruta)
+    es_riohacha: bool = False
     default_flypass: float = 0.0
     default_peajes: float = 0.0
     default_urea_acpm: float = 0.0
@@ -1185,9 +1035,6 @@ class Ruta:
 
     @property
     def es_urbana(self) -> bool:
-        """NUEVO v4.3: una ruta es 'urbana/normal' cuando no está marcada como
-        frontera, regional, Aguachica ni Riohacha. Es el mismo criterio que ya
-        usa la comisión del conductor urbano."""
         return not (self.es_frontera or self.es_regional or self.es_aguachica or self.es_riohacha)
 
 
@@ -1198,12 +1045,11 @@ class DatosColombia:
     NOMINA_ADMIN_DIVISOR = 14
     NOMINA_CONDUCTOR_DIA = 20000
 
-    # --- Comisión conductor (ACTUALIZADA) ---
-    COMISION_URBANO_DIA = 120000     # $120.000 x NÚMERO DE VIAJES del día (v4.2, antes era x días de viaje)
-    COMISION_FRONTERA = 565000       # fija
-    COMISION_REGIONAL = 200000       # fija
-    COMISION_AGUACHICA = 360000      # fija
-    COMISION_RIOACHA = 350000        # fija
+    COMISION_URBANO_DIA = 120000
+    COMISION_FRONTERA = 565000
+    COMISION_REGIONAL = 200000
+    COMISION_AGUACHICA = 360000
+    COMISION_RIOACHA = 350000
 
     MANTENIMIENTO_MENSUAL = 1500000
     SEGURO_1 = 1400000
@@ -1218,11 +1064,10 @@ class DatosColombia:
     CRUCE_FRONTERA = 560000
     PARQUEO_DIA = 15000
     MARGEN_ANT_EMPRESA = 0.90
-    PUNTO_EQUILIBRIO_PORCENTAJE = 0.40   # ACTUALIZADO: antes era Total Gastos / 0.5
+    PUNTO_EQUILIBRIO_PORCENTAJE = 0.40
 
-    # --- NUEVO v4.3: constantes de la automatización cliente AGOFER / urbano ---
-    AGOFER_VALOR_POR_KG = 27500       # Flete = Peso (kg) x 27.500 x N° de Viajes
-    AGOFER_CARGUE_DESCARGUE = 30000   # Cargue/Descargue = 30.000 x N° de Viajes
+    AGOFER_VALOR_POR_KG = 27500
+    AGOFER_CARGUE_DESCARGUE = 30000
 
 
 # ==================== ASIGNACION DE CONDUCTORES ====================
@@ -1262,49 +1107,38 @@ class CalculadoraCostos:
         self.conductor = conductor
         self.ruta = ruta
         self.dias_viaje = dias_viaje
-        self.numero_viajes = numero_viajes    # NUEVO v4.2
+        self.numero_viajes = numero_viajes
         self.es_frontera = es_frontera
         self.hubo_parqueo = hubo_parqueo
         self.flypass = flypass
         self.peajes = peajes
-        self.urea_acpm = urea_acpm            # NUEVO
+        self.urea_acpm = urea_acpm
         self.hotel = hotel
         self.comida = comida
-        self.transporte = transporte          # NUEVO
-        self.propina_comision = propina_comision  # NUEVO
+        self.transporte = transporte
+        self.propina_comision = propina_comision
         self.cargue_descargue = cargue_descargue
         self.otros = otros
         self.valor_flete = valor_flete
         self.anticipo = anticipo
         self.hubo_anticipo_empresa = hubo_anticipo_empresa
         self.datos = datos
-        self.peso = peso                      # NUEVO v4.3
-        self.cliente = cliente                # NUEVO v4.3
+        self.peso = peso
+        self.cliente = cliente
 
-    # ---------------- NUEVO v4.3: automatización cliente AGOFER / urbano ----------------
     def aplica_formula_agofer(self) -> bool:
-        """La automatización (flete por peso, cargue/descargue y distancia real
-        recorrida) aplica cuando la ruta es URBANA (no frontera/regional/
-        Aguachica/Riohacha) Y el cliente es AGOFER."""
         return self.ruta.es_urbana and not self.es_frontera and es_cliente_agofer(self.cliente)
 
     @property
     def distancia_efectiva(self) -> float:
-        """Distancia realmente recorrida en el día. Para viajes urbanos de
-        AGOFER = distancia de la ruta x número de viajes (ej. ruta de 39 km
-        con 3 viajes = 117 km). En cualquier otro caso, es la distancia de
-        la ruta tal cual (comportamiento de siempre)."""
         if self.aplica_formula_agofer():
             return self.ruta.distancia_km * self.numero_viajes
         return self.ruta.distancia_km
 
     def calcular_flete_sugerido_agofer(self) -> float:
-        """Flete sugerido = Peso (kg) x 27.500 x Número de Viajes.
-        Solo tiene sentido cuando aplica_formula_agofer() es True."""
         return self.peso * self.datos.AGOFER_VALOR_POR_KG * self.numero_viajes
 
     def calcular_cargue_descargue_sugerido_agofer(self) -> float:
-        """Cargue/Descargue - Amarre/Desamarre sugerido = 30.000 x Número de Viajes."""
         return self.datos.AGOFER_CARGUE_DESCARGUE * self.numero_viajes
 
     def calcular_nomina_admin(self) -> float:
@@ -1314,13 +1148,6 @@ class CalculadoraCostos:
         return self.datos.NOMINA_CONDUCTOR_DIA * self.dias_viaje
 
     def calcular_comision_conductor(self) -> float:
-        """ACTUALIZADO v4.2:
-        - Aguachica -> $360.000 fijo
-        - Riohacha  -> $350.000 fijo
-        - Regional  -> $200.000 fijo
-        - Frontera  -> $565.000 fijo
-        - Urbano/Normal -> $120.000 x NÚMERO DE VIAJES del día (antes era x días de viaje)
-        """
         if self.ruta.es_aguachica:
             return self.datos.COMISION_AGUACHICA
         elif self.ruta.es_riohacha:
@@ -1347,19 +1174,14 @@ class CalculadoraCostos:
         return (self.datos.TECNOMECANICA_ANUAL / 365) * self.dias_viaje
 
     def calcular_llantas(self) -> float:
-        """ACTUALIZADO v4.3: usa la distancia EFECTIVA (ruta x número de
-        viajes para casos AGOFER urbano; distancia de la ruta en los demás
-        casos), para reflejar el desgaste real por los km recorridos."""
         costo_por_km = (self.datos.LLANTAS_COSTO * self.datos.LLANTAS_CANTIDAD) / self.datos.LLANTAS_KM
         return costo_por_km * self.distancia_efectiva
 
     def calcular_aceite(self) -> float:
-        """ACTUALIZADO v4.3: usa la distancia EFECTIVA (ver calcular_llantas)."""
         costo_por_km = self.datos.ACEITE_COSTO / self.datos.ACEITE_KM
         return costo_por_km * self.distancia_efectiva
 
     def calcular_galones_necesarios(self) -> float:
-        """ACTUALIZADO v4.3: usa la distancia EFECTIVA (ver calcular_llantas)."""
         if self.tractomula.consumo_km_galon <= 0:
             return 0.0
         return self.distancia_efectiva / self.tractomula.consumo_km_galon
@@ -1375,7 +1197,6 @@ class CalculadoraCostos:
         return self.datos.PARQUEO_DIA * self.dias_viaje if self.hubo_parqueo else 0
 
     def calcular_legalizacion(self) -> float:
-        """ACTUALIZADO: incluye Urea/ACPM, Transporte y Propina/Comisión"""
         return (self.peajes + self.urea_acpm + self.calcular_cruce_frontera() + self.hotel +
                 self.comida + self.transporte + self.calcular_parqueo() +
                 self.propina_comision + self.cargue_descargue + self.otros)
@@ -1404,7 +1225,6 @@ class CalculadoraCostos:
         cruce_frontera = self.calcular_cruce_frontera()
         parqueo = self.calcular_parqueo()
 
-        # TOTAL GASTOS ACTUALIZADO: incluye Urea/ACPM, Transporte y Propina/Comisión
         total_gastos = (
             nomina_admin + nomina_conductor + comision_conductor + mantenimiento +
             seguros + tecnomecanica + llantas + aceite + combustible +
@@ -1416,7 +1236,6 @@ class CalculadoraCostos:
         legalizacion = self.calcular_legalizacion()
         saldo = self.calcular_saldo()
 
-        # PUNTO DE EQUILIBRIO ACTUALIZADO: Valor del Flete x 40% (antes Total Gastos / 0.5)
         punto_equilibrio = self.valor_flete * self.datos.PUNTO_EQUILIBRIO_PORCENTAJE
 
         utilidad = self.valor_flete - total_gastos
@@ -1783,6 +1602,44 @@ def mantener_app_activa():
             st.rerun()
 
 
+# ==================== CACHE DE LISTAS BASE (NUEVO v4.6) ====================
+# Estas listas (tractomulas, conductores, rutas) cambian poco comparado con
+# la cantidad de reruns que dispara la app (cada clic, cada cambio de
+# pestaña). Antes se releían de Supabase en cada `if 'x' not in
+# session_state`, lo cual solo pasaba una vez por sesión, pero cualquier
+# guardado/eliminado forzaba una lectura fresca SIN cache. Ahora se cachean
+# 30s y se invalida el cache explícitamente al guardar/eliminar, para que
+# el próximo st.rerun() no tenga que golpear la red si nada cambió.
+@st.cache_data(ttl=30)
+def _tractomulas_cached(_db):
+    return _db.obtener_tractomulas()
+
+
+@st.cache_data(ttl=30)
+def _conductores_cached(_db):
+    return _db.obtener_conductores()
+
+
+@st.cache_data(ttl=30)
+def _rutas_cached(_db):
+    return _db.obtener_rutas()
+
+
+def _refrescar_tractomulas(db):
+    _tractomulas_cached.clear()
+    st.session_state.tractomulas = db.obtener_tractomulas()
+
+
+def _refrescar_conductores(db):
+    _conductores_cached.clear()
+    st.session_state.conductores = db.obtener_conductores()
+
+
+def _refrescar_rutas(db):
+    _rutas_cached.clear()
+    st.session_state.rutas = db.obtener_rutas()
+
+
 # ==================== APLICACIÓN PRINCIPAL ====================
 def main():
     st.set_page_config(page_title="Calculadora de Costos Transporte - Colombia 2026", layout="wide")
@@ -1799,11 +1656,11 @@ def main():
         st.session_state.calculadoras = []
 
     if 'tractomulas' not in st.session_state:
-        st.session_state.tractomulas = st.session_state.db.obtener_tractomulas()
+        st.session_state.tractomulas = _tractomulas_cached(st.session_state.db)
     if 'conductores' not in st.session_state:
-        st.session_state.conductores = st.session_state.db.obtener_conductores()
+        st.session_state.conductores = _conductores_cached(st.session_state.db)
     if 'rutas' not in st.session_state:
-        st.session_state.rutas = st.session_state.db.obtener_rutas()
+        st.session_state.rutas = _rutas_cached(st.session_state.db)
 
     datos = st.session_state.datos
     db = st.session_state.db
@@ -1845,12 +1702,15 @@ def main():
 - Punto de equilibrio: Valor Flete x {int(datos.PUNTO_EQUILIBRIO_PORCENTAJE*100)}%
         """)
 
-    # ==================== NAVEGACIÓN PERSISTENTE (NUEVO v4.4) ====================
-    # Antes se usaba st.tabs(), que NO conserva la pestaña activa cuando el
-    # script hace st.rerun() (por ejemplo al guardar una tractomula, ruta,
-    # conductor, viaje, liquidación o cuenta). Por eso la app "saltaba" al
-    # Dashboard después de cada guardado. Ahora la pestaña activa se guarda
-    # en st.session_state y se restaura en cada rerun.
+    # ==================== NAVEGACIÓN PERSISTENTE (CORREGIDO v4.6) ====================
+    # ANTES: se reasignaba st.session_state.tab_actual = st.radio(...) en la
+    # misma línea donde se creaba el widget. Combinado con la latencia de red
+    # hacia Supabase que había en otras partes de la app, esto se sentía como
+    # si hubiera que hacer clic dos veces para que la pestaña cambiara.
+    # AHORA: se usa on_change con un callback dedicado, que actualiza
+    # st.session_state.tab_actual ANTES de que el script vuelva a correr de
+    # arriba a abajo. Así, en el mismo rerun que dispara el clic, tab_actual
+    # ya tiene el valor nuevo y el contenido correcto se muestra de inmediato.
     opciones_tabs = [
         "📊 Dashboard",
         "1. Tractomulas",
@@ -1868,13 +1728,17 @@ def main():
     if 'tab_actual' not in st.session_state:
         st.session_state.tab_actual = opciones_tabs[0]
 
-    st.session_state.tab_actual = st.radio(
+    def _cambiar_tab_actual():
+        st.session_state.tab_actual = st.session_state.selector_tab_nav
+
+    st.radio(
         "Navegación",
         opciones_tabs,
         horizontal=True,
         index=opciones_tabs.index(st.session_state.tab_actual),
         key="selector_tab_nav",
         label_visibility="collapsed",
+        on_change=_cambiar_tab_actual,
     )
     tab_actual = st.session_state.tab_actual
 
@@ -1882,8 +1746,6 @@ def main():
     if tab_actual == opciones_tabs[0]:
         st.header("📊 Dashboard - Resumen de tu Negocio")
 
-        # NUEVO v4.1: cache de 20s para no recalcular todo el dashboard en
-        # cada rerun de Streamlit (cada clic en cualquier parte de la app).
         @st.cache_data(ttl=20)
         def _dashboard_data_cached(_db):
             return _db.obtener_dashboard_data()
@@ -1986,8 +1848,6 @@ def main():
         st.divider()
         st.subheader("Totales Acumulados por Unidad")
 
-        # NUEVO v4.1: cache de 20s para los totales por placa (se usa 2 veces
-        # en este mismo tab: para la placa seleccionada y para la comparativa).
         @st.cache_data(ttl=20)
         def _totales_por_placa_cached(_db):
             return _db.obtener_totales_por_placa()
@@ -2028,16 +1888,6 @@ def main():
     if tab_actual == opciones_tabs[1]:
         st.header("Tus Tractomulas")
 
-        # ---------------------------------------------------------------
-        # CORREGIDO v4.5: el selectbox que decide si se muestra el campo
-        # "Placa manual" ahora vive FUERA del form. Dentro de un st.form,
-        # ningún widget dispara un rerun hasta el submit, así que el
-        # text_input de placa manual se creaba recién en el mismo instante
-        # del submit y llegaba vacío (por eso "no se guardaba" la
-        # tractomula nueva). Al sacarlo del form, el campo aparece de
-        # inmediato al elegir "(Escribir nueva)" y su valor sí llega
-        # completo al momento de dar submit.
-        # ---------------------------------------------------------------
         placas_opciones = ['(Escribir nueva)'] + sorted(PLACA_CONDUCTOR.keys())
         placa_seleccion = st.selectbox("Placa", placas_opciones, key="tractomula_placa_sel")
         if placa_seleccion == '(Escribir nueva)':
@@ -2058,7 +1908,7 @@ def main():
             if submit and placa:
                 tractomula = Tractomula(placa, consumo_km_galon, tipo)
                 if db.guardar_tractomula(tractomula):
-                    st.session_state.tractomulas = db.obtener_tractomulas()
+                    _refrescar_tractomulas(db)
                     st.success(f"✅ Tractomula {placa} guardada!")
                     st.rerun()
                 else:
@@ -2075,7 +1925,7 @@ def main():
                 with col2:
                     if st.button("🗑️", key=f"eliminar_tractomula_{idx}"):
                         db.eliminar_tractomula(t.placa)
-                        st.session_state.tractomulas = db.obtener_tractomulas()
+                        _refrescar_tractomulas(db)
                         st.success(f"Tractomula {t.placa} eliminada")
                         st.rerun()
 
@@ -2164,16 +2014,12 @@ def main():
                     default_cargue_descargue=default_cargue_descargue, default_otros=default_otros
                 )
                 ruta_id = db.guardar_ruta(ruta)
-                st.session_state.rutas = db.obtener_rutas()
+                _refrescar_rutas(db)
                 st.success(f"✅ Ruta {origen} → {destino} guardada! (ID: {ruta_id})")
                 st.rerun()
 
         if st.session_state.rutas:
             st.subheader("Rutas Registradas")
-            # NUEVO v4.1: antes esto volvía a abrir una conexión y a consultar
-            # la tabla `rutas` por segunda vez en el mismo render, solo para
-            # mostrar la lista con botón de eliminar. Ahora usa un único
-            # método (obtener_rutas_con_id) que reutiliza el pool.
             rutas_con_id = db.obtener_rutas_con_id()
 
             for ruta_data in rutas_con_id:
@@ -2203,7 +2049,7 @@ def main():
                 with col2:
                     if st.button("🗑️", key=f"eliminar_ruta_{ruta_id}"):
                         db.eliminar_ruta(ruta_id)
-                        st.session_state.rutas = db.obtener_rutas()
+                        _refrescar_rutas(db)
                         st.success("Ruta eliminada")
                         st.rerun()
 
@@ -2228,12 +2074,6 @@ def main():
                 "EDUARDO RAFAEL OLIVARES ALCAZAR": "486357159"
             }
 
-        # ---------------------------------------------------------------
-        # CORREGIDO v4.5: mismo bug que en Tab 1. El selectbox que decide
-        # si se muestra el campo "Nombre manual" ahora vive FUERA del
-        # form, para que el text_input aparezca de inmediato y su valor
-        # llegue completo al presionar "Agregar Conductor".
-        # ---------------------------------------------------------------
         nombres_opciones = ['(Escribir nuevo)'] + sorted([n for n in PLACA_CONDUCTOR.values() if n])
         nombre_seleccion = st.selectbox("Nombre", nombres_opciones, key="conductor_nombre_sel")
         if nombre_seleccion == '(Escribir nuevo)':
@@ -2255,7 +2095,7 @@ def main():
             if submit and nombre and cedula:
                 conductor = Conductor(nombre, cedula)
                 if db.guardar_conductor(conductor):
-                    st.session_state.conductores = db.obtener_conductores()
+                    _refrescar_conductores(db)
                     st.session_state.conductores_cedulas[nombre] = cedula
                     st.success(f"✅ Conductor {nombre} guardado!")
                     st.rerun()
@@ -2273,7 +2113,7 @@ def main():
                 with col2:
                     if st.button("🗑️", key=f"eliminar_conductor_{idx}"):
                         db.eliminar_conductor(c.nombre)
-                        st.session_state.conductores = db.obtener_conductores()
+                        _refrescar_conductores(db)
                         st.success(f"Conductor {c.nombre} eliminado")
                         st.rerun()
 
@@ -2328,7 +2168,6 @@ def main():
                 if peso > 0:
                     st.caption(f"⚖️ {formatear_numero(peso)} kg")
 
-            # ---------------- NUEVO v4.3: bandera y valores sugeridos de la automatización AGOFER ----------------
             aplica_agofer = ruta_obj.es_urbana and es_cliente_agofer(cliente_viaje)
             flete_sugerido_agofer = peso * datos.AGOFER_VALOR_POR_KG * numero_viajes if aplica_agofer else 0.0
             cargue_sugerido_agofer = datos.AGOFER_CARGUE_DESCARGUE * numero_viajes if aplica_agofer else 0.0
@@ -2399,8 +2238,6 @@ def main():
                     if propina_comision > 0:
                         st.caption(f"💵 {formatear_numero(propina_comision)}")
                 with col2:
-                    # NUEVO v4.3: si aplica la automatización AGOFER, se precarga con el valor
-                    # calculado (30.000 x N° Viajes); si no, se comporta como siempre (default de la ruta).
                     valor_default_cargue = cargue_sugerido_agofer if aplica_agofer else ruta_obj.default_cargue_descargue
                     cargue_texto = st.text_input(
                         "Cargue/Descargue - Amarre/Desamarre (COP)",
@@ -2429,8 +2266,6 @@ def main():
                 st.divider()
                 st.subheader("💰 Valor del Flete")
 
-                # NUEVO v4.3: si aplica la automatización AGOFER, se precarga con
-                # Peso x 27.500 x Número de Viajes. Sigue siendo editable.
                 valor_flete_default = flete_sugerido_agofer if aplica_agofer else 0.0
                 valor_flete_texto = st.text_input(
                     "💰 Valor del Flete Cobrado al Cliente (COP)",
@@ -2583,7 +2418,13 @@ def main():
 
             buscar = st.button("🔍 Buscar", type="primary")
 
-        if buscar or 'ultima_busqueda' not in st.session_state:
+        # CORREGIDO v4.6: se separa claramente "hay que buscar" (botón
+        # presionado o primera vez que se abre la pestaña) de "reutilizar lo
+        # último guardado", en vez de mezclar ambas condiciones en un solo if
+        # que dejaba el resultado un rerun atrasado respecto a los filtros
+        # visibles en pantalla.
+        primera_vez = 'ultima_busqueda' not in st.session_state
+        if buscar or primera_vez:
             fecha_ini = fecha_inicio.strftime('%Y-%m-%d') if fecha_inicio else None
             fecha_fi = fecha_fin.strftime('%Y-%m-%d') if fecha_fin else None
             placa_f = None if placa_filtro == "Todas" else placa_filtro
@@ -2708,7 +2549,6 @@ def main():
                     st.markdown("### 📊 Desglose de Costos")
                     col1, col2, col3 = st.columns(3)
 
-                    # Nota: viaje[40], [41], [42] = urea_acpm, transporte, propina_comision (columnas nuevas al final)
                     with col1:
                         st.write(f"1. Nómina Admin: ${formatear_numero(viaje[10])}")
                         st.write(f"2. Nómina Conductor: ${formatear_numero(viaje[11])}")
@@ -2774,8 +2614,6 @@ def main():
                         if not placas_disponibles or not conductores_disponibles or not rutas_disponibles:
                             st.error("⚠️ No se puede editar: faltan tractomulas, conductores o rutas registradas actualmente.")
                         else:
-                            # Cliente y Número de Viajes se leen fuera del form de edición para poder
-                            # recalcular en vivo los valores sugeridos de AGOFER (igual que en Tab 4).
                             edit_ruta_str_preview = st.selectbox("Ruta", rutas_disponibles, index=idx_ruta, key="edit_ruta_preview")
                             edit_ruta_obj_preview = next(r for r in st.session_state.rutas if f"{r.origen} → {r.destino}" == edit_ruta_str_preview)
                             edit_numero_viajes_preview = st.number_input(
@@ -2839,7 +2677,6 @@ def main():
                                 with col3:
                                     edit_propina_texto = st.text_input("Propina/Comisión (COP)", value=formatear_numero(viaje[42]) if len(viaje) > 42 and viaje[42] else "", key="edit_propina")
                                     edit_propina = limpiar_numero(edit_propina_texto)
-                                    # NUEVO v4.3: precarga con el valor sugerido AGOFER si aplica; si no, con el valor ya guardado.
                                     valor_default_cargue_edit = edit_cargue_sugerido if edit_aplica_agofer else (viaje[26] or 0)
                                     edit_cargue_texto = st.text_input(
                                         "Cargue/Descargue (COP)",
@@ -2853,7 +2690,6 @@ def main():
 
                                 col1, col2 = st.columns(2)
                                 with col1:
-                                    # NUEVO v4.3: precarga con el valor sugerido AGOFER si aplica.
                                     valor_default_flete_edit = edit_flete_sugerido if edit_aplica_agofer else (viaje[31] or 0)
                                     edit_valor_flete_texto = st.text_input(
                                         "Valor del Flete (COP)",
@@ -2877,8 +2713,6 @@ def main():
                                 if guardar_edicion:
                                     edit_tractomula_obj = next(t for t in st.session_state.tractomulas if t.placa == edit_placa)
                                     edit_conductor_obj = next(c for c in st.session_state.conductores if c.nombre == edit_conductor)
-                                    # Se usan la ruta, número de viajes, cliente y peso capturados arriba (fuera del form),
-                                    # que son los que ya alimentaron los valores sugeridos de AGOFER.
                                     edit_ruta_obj = edit_ruta_obj_preview
                                     edit_numero_viajes = edit_numero_viajes_preview
                                     edit_cliente = edit_cliente_preview
@@ -2963,7 +2797,6 @@ def main():
                 mes_seleccionado = st.selectbox("Mes", range(1, 13))
                 año_seleccionado = st.selectbox("Año", range(2020, datetime.now().year + 1))
                 fecha_inicio = f"{año_seleccionado}-{mes_seleccionado:02d}-01"
-                # --- CORREGIDO: bug de diciembre (antes intentaba crear datetime(año, 13, 1)) ---
                 if mes_seleccionado == 12:
                     fecha_fin = f"{año_seleccionado}-12-31"
                 else:
@@ -2984,7 +2817,8 @@ def main():
 
             buscar_totales = st.button("Aplicar Filtro", type="primary")
 
-        if buscar_totales or 'ultimos_totales' not in st.session_state:
+        primera_vez_totales = 'ultimos_totales' not in st.session_state
+        if buscar_totales or primera_vez_totales:
             df_totales = db.obtener_totales_por_placa(fecha_inicio, fecha_fin)
             st.session_state.ultimos_totales = df_totales
         else:
