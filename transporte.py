@@ -1736,6 +1736,12 @@ def main():
 
     if 'tractomulas' not in st.session_state:
         st.session_state.tractomulas = _tractomulas_cached(st.session_state.db)
+    elif st.session_state.tractomulas and not hasattr(st.session_state.tractomulas[0], 'consumo_urbano'):
+        # Sesión con objetos de una versión anterior del código (sin los campos nuevos
+        # de consumo por tipo de ruta): forzar recarga fresca desde la base de datos.
+        _tractomulas_cached.clear()
+        st.session_state.tractomulas = st.session_state.db.obtener_tractomulas()
+
     if 'conductores' not in st.session_state:
         st.session_state.conductores = _conductores_cached(st.session_state.db)
     if 'rutas' not in st.session_state:
