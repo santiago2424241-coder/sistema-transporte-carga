@@ -219,6 +219,21 @@ class DatabaseManager:
                 )
             ''')
 
+            # ---------------- Consumo km/galón por tipo de ruta ----------------
+            cursor.execute("ALTER TABLE tractomulas ADD COLUMN IF NOT EXISTS consumo_urbano REAL")
+            cursor.execute("ALTER TABLE tractomulas ADD COLUMN IF NOT EXISTS consumo_regional REAL")
+            cursor.execute("ALTER TABLE tractomulas ADD COLUMN IF NOT EXISTS consumo_frontera REAL")
+            cursor.execute("ALTER TABLE tractomulas ADD COLUMN IF NOT EXISTS consumo_aguachica REAL")
+            cursor.execute("ALTER TABLE tractomulas ADD COLUMN IF NOT EXISTS consumo_riohacha REAL")
+            cursor.execute("""
+                UPDATE tractomulas SET
+                    consumo_urbano = COALESCE(consumo_urbano, consumo_km_galon),
+                    consumo_regional = COALESCE(consumo_regional, consumo_km_galon),
+                    consumo_frontera = COALESCE(consumo_frontera, consumo_km_galon),
+                    consumo_aguachica = COALESCE(consumo_aguachica, consumo_km_galon),
+                    consumo_riohacha = COALESCE(consumo_riohacha, consumo_km_galon)
+            """)
+
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS conductores (
                     id SERIAL PRIMARY KEY,
@@ -720,12 +735,48 @@ class DatabaseManager:
         try:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO tractomulas (placa, consumo_km_galon, tipo)
-                VALUES (%s, %s, %s)
-            ''', (tractomula.placa, tractomula.consumo_km_galon, tractomula.tipo))
+                INSERT INTO tractomulas (
+                    placa, consumo_km_galon, tipo,
+                    consumo_urbano, consumo_regional, consumo_frontera,
+                    consumo_aguachica, consumo_riohacha
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ''', (
+                tractomula.placa, tractomula.consumo_km_galon, tractomula.tipo,
+                tractomula.consumo_urbano, tractomula.consumo_regional,
+                tractomula.consumo_frontera, tractomula.consumo_aguachica,
+                tractomula.consumo_riohacha
+            ))
             conn.commit()
             return True
         except Exception:
+            return False
+        finally:
+            self.release_connection(conn)
+
+    def actualizar_tractomula(self, tractomula):
+        """Actualiza el tipo y los consumos km/galón por tipo de ruta de una tractomula existente."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE tractomulas SET
+                    tipo = %s,
+                    consumo_urbano = %s,
+                    consumo_regional = %s,
+                    consumo_frontera = %s,
+                    consumo_aguachica = %s,
+                    consumo_riohacha = %s
+                WHERE placa = %s
+            ''', (
+                tractomula.tipo, tractomula.consumo_urbano, tractomula.consumo_regional,
+                tractomula.consumo_frontera, tractomula.consumo_aguachica,
+                tractomula.consumo_riohacha, tractomula.placa
+            ))
+            conn.commit()
+            return True
+        except Exception as e:
+            st.error(f"❌ Error al actualizar tractomula: {e}")
             return False
         finally:
             self.release_connection(conn)
@@ -734,13 +785,23 @@ class DatabaseManager:
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM tractomulas ORDER BY placa")
+            cursor.execute("""
+                SELECT placa, consumo_km_galon, tipo,
+                       consumo_urbano, consumo_regional, consumo_frontera,
+                       consumo_aguachica, consumo_riohacha
+                FROM tractomulas ORDER BY placa
+            """)
             tractomulas = []
             for row in cursor.fetchall():
                 tractomulas.append(Tractomula(
-                    placa=row[1],
-                    consumo_km_galon=row[2],
-                    tipo=row[3]
+                    placa=row[0],
+                    consumo_km_galon=row[1],
+                    tipo=row[2],
+                    consumo_urbano=row[3] or row[1] or 0.0,
+                    consumo_regional=row[4] or row[1] or 0.0,
+                    consumo_frontera=row[5] or row[1] or 0.0,
+                    consumo_aguachica=row[6] or row[1] or 0.0,
+                    consumo_riohacha=row[7] or row[1] or 0.0,
                 ))
             return tractomulas
         finally:
@@ -1090,8 +1151,13 @@ class DatabaseManager:
 @dataclass
 class Tractomula:
     placa: str
-    consumo_km_galon: float
+    consumo_km_galon: float  # valor legado/general, ya no se usa directamente en el cálculo
     tipo: str
+    consumo_urbano: float = 0.0
+    consumo_regional: float = 0.0
+    consumo_frontera: float = 0.0
+    consumo_aguachica: float = 0.0
+    consumo_riohacha: float = 0.0
 
 
 @dataclass
@@ -1267,10 +1333,25 @@ class CalculadoraCostos:
         costo_por_km = self.datos.ACEITE_COSTO / self.datos.ACEITE_KM
         return costo_por_km * self.distancia_efectiva
 
+    def obtener_consumo_km_galon(self) -> float:
+        """Devuelve el consumo (km/galón) de la tractomula según el TIPO DE RUTA del viaje."""
+        if self.ruta.es_aguachica:
+            consumo = self.tractomula.consumo_aguachica
+        elif self.ruta.es_riohacha:
+            consumo = self.tractomula.consumo_riohacha
+        elif self.ruta.es_regional:
+            consumo = self.tractomula.consumo_regional
+        elif self.es_frontera:
+            consumo = self.tractomula.consumo_frontera
+        else:
+            consumo = self.tractomula.consumo_urbano
+        return consumo if consumo and consumo > 0 else self.tractomula.consumo_km_galon
+
     def calcular_galones_necesarios(self) -> float:
-        if self.tractomula.consumo_km_galon <= 0:
+        consumo = self.obtener_consumo_km_galon()
+        if consumo <= 0:
             return 0.0
-        return self.distancia_efectiva / self.tractomula.consumo_km_galon
+        return self.distancia_efectiva / consumo
 
     def calcular_combustible(self) -> float:
         galones = self.calcular_galones_necesarios()
