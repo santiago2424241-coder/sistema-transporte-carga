@@ -323,6 +323,32 @@ class DatabaseManager:
             if conn is not None:
                 self.release_connection(conn)
 
+    def buscar_viaje_similar_reciente(self, placa, conductor, fecha_viaje, valor_flete,
+                                        dias_viaje, numero_viajes, minutos=15):
+        """Busca si ya existe un viaje casi idéntico (misma placa, conductor, fecha del viaje,
+        valor de flete, días y número de viajes) guardado en los últimos `minutos` minutos.
+        Se usa para avisar antes de guardar un posible duplicado por doble clic o reintento."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            fecha_viaje_str = fecha_viaje.strftime('%Y-%m-%d') if hasattr(fecha_viaje, 'strftime') else fecha_viaje
+            limite = (datetime.now() - timedelta(hours=5) - timedelta(minutes=minutos)).strftime('%Y-%m-%d %H:%M:%S')
+            cursor.execute("""
+                SELECT id, fecha_creacion FROM viajes_v4
+                WHERE placa = %s AND conductor = %s AND fecha_viaje = %s
+                  AND valor_flete = %s AND dias_viaje = %s AND numero_viajes = %s
+                  AND fecha_creacion >= %s
+                ORDER BY fecha_creacion DESC LIMIT 1
+            """, (placa, conductor, fecha_viaje_str, valor_flete, dias_viaje, numero_viajes, limite))
+            row = cursor.fetchone()
+            if row:
+                return {'id': row[0], 'fecha_creacion': row[1]}
+            return None
+        except Exception:
+            return None
+        finally:
+            self.release_connection(conn)
+
     def guardar_viaje(self, calculadora, fecha_viaje, observaciones="", cliente=""):
         conn = None
         try:
@@ -2339,6 +2365,54 @@ def main():
     if tab_actual == opciones_tabs[4]:
         st.header("Realizar Cálculo de Viaje")
 
+        # ---------------- Aviso persistente del último viaje guardado ----------------
+        # No desaparece solo en el siguiente rerun (a diferencia de st.success dentro del
+        # form), para que sea imposible no darse cuenta de que SÍ se guardó y evitar así
+        # que se vuelva a guardar el mismo viaje por error.
+        if st.session_state.get('ultimo_guardado_info'):
+            info = st.session_state.ultimo_guardado_info
+            col_aviso, col_cerrar = st.columns([6, 1])
+            with col_aviso:
+                st.success(
+                    f"✅ Último viaje guardado con éxito — ID **{info['id']}** — "
+                    f"{info['placa']} — {info['fecha']} — Flete ${formatear_numero(info['flete'])} "
+                    f"— guardado {info['hace']}"
+                )
+            with col_cerrar:
+                if st.button("✖️ Ocultar", key="cerrar_aviso_guardado"):
+                    del st.session_state.ultimo_guardado_info
+                    st.rerun()
+
+        # ---------------- Confirmación de posible duplicado ----------------
+        if st.session_state.get('viaje_pendiente_confirmar'):
+            pend = st.session_state.viaje_pendiente_confirmar
+            st.warning(
+                f"⚠️ Ya existe un viaje MUY PARECIDO (misma placa, conductor, fecha, días, "
+                f"N° de viajes y valor de flete) guardado hace poco — ID **{pend['duplicado_id']}** "
+                f"({pend['duplicado_fecha_creacion']}). ¿Seguro que quieres guardar este viaje de nuevo?"
+            )
+            col_si, col_no = st.columns(2)
+            with col_si:
+                if st.button("✅ Sí, guardar de todas formas", key="confirmar_guardar_duplicado", type="primary"):
+                    viaje_id = db.guardar_viaje(
+                        pend['calculadora'], pend['fecha_viaje'], pend['observaciones'], pend['cliente']
+                    )
+                    if viaje_id:
+                        st.session_state.ultimo_guardado_info = {
+                            'id': viaje_id,
+                            'placa': pend['calculadora'].tractomula.placa,
+                            'fecha': pend['fecha_viaje'].strftime('%Y-%m-%d'),
+                            'flete': pend['calculadora'].valor_flete,
+                            'hace': 'justo ahora',
+                        }
+                    del st.session_state.viaje_pendiente_confirmar
+                    st.rerun()
+            with col_no:
+                if st.button("❌ Cancelar, no guardar de nuevo", key="cancelar_guardar_duplicado"):
+                    del st.session_state.viaje_pendiente_confirmar
+                    st.rerun()
+            st.divider()
+
         # ---------------- NUEVO v4.8: Checkbox de Día Vacío ----------------
         dia_vacio = st.checkbox(
             "🚫 Día vacío (el carro NO hizo viaje este día)",
@@ -2615,41 +2689,68 @@ def main():
                             st.session_state.calculadoras.append(calculadora)
 
                             if guardar:
-                                viaje_id = db.guardar_viaje(calculadora, fecha_viaje, observaciones, cliente_viaje)
-                                if viaje_id:
-                                    costos = calculadora.calcular_costos_totales()
-                                    utilidad = costos.get('utilidad', 0)
-                                    if utilidad >= 0:
-                                        st.success(f"""
-                                        ✅ **Viaje guardado exitosamente (ID: {viaje_id})**
-
-                                        - Fecha del Viaje: {fecha_viaje.strftime('%Y-%m-%d')}
-                                        - Número de Viajes: {numero_viajes}
-                                        - Peso: {formatear_numero(peso)} kg
-                                        - Distancia efectiva: {formatear_numero(calculadora.distancia_efectiva)} km
-                                        - Total Gastos: ${formatear_numero(costos['total_gastos'])}
-                                        - Valor Flete: ${formatear_numero(calculadora.valor_flete)}
-                                        - **Utilidad: ${formatear_numero(utilidad)}**
-                                        - **Rentabilidad: {costos['rentabilidad']:.1f}%**
-                                        - **Saldo: ${formatear_numero(costos['saldo'])}**
-                                        """)
-                                    else:
-                                        st.error(f"""
-                                        ⚠️ **Viaje guardado (ID: {viaje_id}) - PÉRDIDA DETECTADA**
-
-                                        - Fecha del Viaje: {fecha_viaje.strftime('%Y-%m-%d')}
-                                        - Número de Viajes: {numero_viajes}
-                                        - Peso: {formatear_numero(peso)} kg
-                                        - Distancia efectiva: {formatear_numero(calculadora.distancia_efectiva)} km
-                                        - Total Gastos: ${formatear_numero(costos['total_gastos'])}
-                                        - Valor Flete: ${formatear_numero(calculadora.valor_flete)}
-                                        - **Pérdida: ${formatear_numero(utilidad)}**
-                                        - **Rentabilidad: {costos['rentabilidad']:.1f}%**
-
-                                        ⚠️ Este viaje NO fue rentable.
-                                        """)
+                                duplicado = db.buscar_viaje_similar_reciente(
+                                    tractomula_obj.placa, conductor_obj.nombre, fecha_viaje,
+                                    valor_flete, dias_viaje, numero_viajes
+                                )
+                                if duplicado:
+                                    # NO se guarda todavía: se pide confirmación explícita arriba del formulario
+                                    st.session_state.viaje_pendiente_confirmar = {
+                                        'calculadora': calculadora,
+                                        'fecha_viaje': fecha_viaje,
+                                        'observaciones': observaciones,
+                                        'cliente': cliente_viaje,
+                                        'duplicado_id': duplicado['id'],
+                                        'duplicado_fecha_creacion': duplicado['fecha_creacion'],
+                                    }
+                                    st.warning(
+                                        "⚠️ Este viaje parece IDÉNTICO a uno guardado hace poco. "
+                                        "Sube al inicio de esta pestaña para confirmar si quieres guardarlo de todas formas."
+                                    )
+                                    st.rerun()
                                 else:
-                                    st.error("❌ Error al guardar el viaje en la base de datos.")
+                                    viaje_id = db.guardar_viaje(calculadora, fecha_viaje, observaciones, cliente_viaje)
+                                    if viaje_id:
+                                        st.session_state.ultimo_guardado_info = {
+                                            'id': viaje_id,
+                                            'placa': tractomula_obj.placa,
+                                            'fecha': fecha_viaje.strftime('%Y-%m-%d'),
+                                            'flete': valor_flete,
+                                            'hace': 'justo ahora',
+                                        }
+                                        costos = calculadora.calcular_costos_totales()
+                                        utilidad = costos.get('utilidad', 0)
+                                        if utilidad >= 0:
+                                            st.success(f"""
+                                            ✅ **Viaje guardado exitosamente (ID: {viaje_id})**
+
+                                            - Fecha del Viaje: {fecha_viaje.strftime('%Y-%m-%d')}
+                                            - Número de Viajes: {numero_viajes}
+                                            - Peso: {formatear_numero(peso)} kg
+                                            - Distancia efectiva: {formatear_numero(calculadora.distancia_efectiva)} km
+                                            - Total Gastos: ${formatear_numero(costos['total_gastos'])}
+                                            - Valor Flete: ${formatear_numero(calculadora.valor_flete)}
+                                            - **Utilidad: ${formatear_numero(utilidad)}**
+                                            - **Rentabilidad: {costos['rentabilidad']:.1f}%**
+                                            - **Saldo: ${formatear_numero(costos['saldo'])}**
+                                            """)
+                                        else:
+                                            st.error(f"""
+                                            ⚠️ **Viaje guardado (ID: {viaje_id}) - PÉRDIDA DETECTADA**
+
+                                            - Fecha del Viaje: {fecha_viaje.strftime('%Y-%m-%d')}
+                                            - Número de Viajes: {numero_viajes}
+                                            - Peso: {formatear_numero(peso)} kg
+                                            - Distancia efectiva: {formatear_numero(calculadora.distancia_efectiva)} km
+                                            - Total Gastos: ${formatear_numero(costos['total_gastos'])}
+                                            - Valor Flete: ${formatear_numero(calculadora.valor_flete)}
+                                            - **Pérdida: ${formatear_numero(utilidad)}**
+                                            - **Rentabilidad: {costos['rentabilidad']:.1f}%**
+
+                                            ⚠️ Este viaje NO fue rentable.
+                                            """)
+                                    else:
+                                        st.error("❌ Error al guardar el viaje en la base de datos.")
                             else:
                                 st.success("✅ Cálculo completado! Ve a la pestaña de Reportes.")
 
