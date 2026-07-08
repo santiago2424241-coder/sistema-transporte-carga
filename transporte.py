@@ -1385,7 +1385,7 @@ VEHÍCULO
 {'-'*70}
 Placa: {calculadora.tractomula.placa}
 Tipo: {calculadora.tractomula.tipo}
-Consumo: {calculadora.tractomula.consumo_km_galon} km/galón
+Consumo usado en este viaje: {calculadora.obtener_consumo_km_galon()} km/galón
 
 CONDUCTOR
 {'-'*70}
@@ -1409,7 +1409,7 @@ DESGLOSE DE COSTOS
 12. Urea y/o ACPM:        ${formatear_numero(calculadora.urea_acpm):>18} COP
 13. Cruce Frontera:       ${formatear_numero(costos['cruce_frontera']):>18} COP
 14. Hotel:                ${formatear_numero(calculadora.hotel):>18} COP
-15. Comida:               ${formatear_numero(calculadora.comida):>18} COP
+15. Comida:                ${formatear_numero(calculadora.comida):>18} COP
 16. Transporte:           ${formatear_numero(calculadora.transporte):>18} COP
 17. Parqueo:              ${formatear_numero(costos['parqueo']):>18} COP
 18. Propina/Comisión:     ${formatear_numero(calculadora.propina_comision):>18} COP
@@ -1689,13 +1689,6 @@ def mantener_app_activa():
 
 
 # ==================== CACHE DE LISTAS BASE (NUEVO v4.6) ====================
-# Estas listas (tractomulas, conductores, rutas) cambian poco comparado con
-# la cantidad de reruns que dispara la app (cada clic, cada cambio de
-# pestaña). Antes se releían de Supabase en cada `if 'x' not in
-# session_state`, lo cual solo pasaba una vez por sesión, pero cualquier
-# guardado/eliminado forzaba una lectura fresca SIN cache. Ahora se cachean
-# 30s y se invalida el cache explícitamente al guardar/eliminar, para que
-# el próximo st.rerun() no tenga que golpear la red si nada cambió.
 @st.cache_data(ttl=30)
 def _tractomulas_cached(_db):
     return _db.obtener_tractomulas()
@@ -1774,6 +1767,10 @@ def main():
 - Riohacha: ${formatear_numero(datos.COMISION_RIOACHA)}
 - Aguachica: ${formatear_numero(datos.COMISION_AGUACHICA)}
 - Frontera: ${formatear_numero(datos.COMISION_FRONTERA)}
+
+**Consumo (km/galón):**
+- Ahora es específico por tractomula Y por tipo de ruta (urbano, regional,
+  frontera, Aguachica, Riohacha). Se configura en la pestaña "1. Tractomulas".
 
 **Automatización Cliente AGOFER (rutas urbanas):**
 - Flete = Peso (kg) x ${formatear_numero(datos.AGOFER_VALOR_POR_KG)} x N° de Viajes
@@ -1965,6 +1962,9 @@ def main():
     # ==================== TAB 1: TRACTOMULAS ====================
     if tab_actual == opciones_tabs[1]:
         st.header("Tus Tractomulas")
+        st.caption("💡 El rendimiento (km/galón) de una misma tractomula cambia según el tipo de ruta "
+                   "(por ejemplo: 5 km/gal en urbano, 7 km/gal en regional). Define un valor para cada tipo; "
+                   "el sistema elige automáticamente el correcto según la ruta del viaje.")
 
         placas_opciones = ['(Escribir nueva)'] + sorted(PLACA_CONDUCTOR.keys())
         placa_seleccion = st.selectbox("Placa", placas_opciones, key="tractomula_placa_sel")
@@ -1980,11 +1980,28 @@ def main():
                 st.write(f"**Placa seleccionada:** {placa or '(sin definir)'}")
                 tipo = st.selectbox("Tipo", ["Sencilla", "Dobletroque", "Minimula", "Otro"])
             with col2:
-                consumo_km_galon = st.number_input("Consumo (km/galón)", min_value=0.0, value=2.5)
+                st.write("**Consumo por tipo de ruta (km/galón)**")
+
+            col1, col2, col3, col4, col5 = st.columns(5)
+            with col1:
+                consumo_urbano = st.number_input("Urbano", min_value=0.0, value=5.0, step=0.1, key="nueva_consumo_urbano")
+            with col2:
+                consumo_regional = st.number_input("Regional", min_value=0.0, value=5.0, step=0.1, key="nueva_consumo_regional")
+            with col3:
+                consumo_frontera = st.number_input("Frontera", min_value=0.0, value=5.0, step=0.1, key="nueva_consumo_frontera")
+            with col4:
+                consumo_aguachica = st.number_input("Aguachica", min_value=0.0, value=5.0, step=0.1, key="nueva_consumo_aguachica")
+            with col5:
+                consumo_riohacha = st.number_input("Riohacha", min_value=0.0, value=5.0, step=0.1, key="nueva_consumo_riohacha")
 
             submit = st.form_submit_button("Agregar Tractomula")
             if submit and placa:
-                tractomula = Tractomula(placa, consumo_km_galon, tipo)
+                tractomula = Tractomula(
+                    placa=placa, consumo_km_galon=consumo_urbano, tipo=tipo,
+                    consumo_urbano=consumo_urbano, consumo_regional=consumo_regional,
+                    consumo_frontera=consumo_frontera, consumo_aguachica=consumo_aguachica,
+                    consumo_riohacha=consumo_riohacha
+                )
                 if db.guardar_tractomula(tractomula):
                     _refrescar_tractomulas(db)
                     st.success(f"✅ Tractomula {placa} guardada!")
@@ -1999,13 +2016,49 @@ def main():
             for idx, t in enumerate(st.session_state.tractomulas):
                 col1, col2 = st.columns([4, 1])
                 with col1:
-                    st.write(f"**{t.placa}** ({t.tipo}, {t.consumo_km_galon} km/gal)")
+                    st.write(
+                        f"**{t.placa}** ({t.tipo}) — "
+                        f"Urbano: {t.consumo_urbano} km/gal | Regional: {t.consumo_regional} km/gal | "
+                        f"Frontera: {t.consumo_frontera} km/gal | Aguachica: {t.consumo_aguachica} km/gal | "
+                        f"Riohacha: {t.consumo_riohacha} km/gal"
+                    )
                 with col2:
                     if st.button("🗑️", key=f"eliminar_tractomula_{idx}"):
                         db.eliminar_tractomula(t.placa)
                         _refrescar_tractomulas(db)
                         st.success(f"Tractomula {t.placa} eliminada")
                         st.rerun()
+
+                with st.expander(f"✏️ Editar consumos de {t.placa}"):
+                    with st.form(key=f"form_editar_tractomula_{idx}"):
+                        ecol1, ecol2, ecol3, ecol4, ecol5 = st.columns(5)
+                        with ecol1:
+                            e_urbano = st.number_input("Urbano", min_value=0.0, value=float(t.consumo_urbano), step=0.1, key=f"edit_urbano_{idx}")
+                        with ecol2:
+                            e_regional = st.number_input("Regional", min_value=0.0, value=float(t.consumo_regional), step=0.1, key=f"edit_regional_{idx}")
+                        with ecol3:
+                            e_frontera = st.number_input("Frontera", min_value=0.0, value=float(t.consumo_frontera), step=0.1, key=f"edit_frontera_{idx}")
+                        with ecol4:
+                            e_aguachica = st.number_input("Aguachica", min_value=0.0, value=float(t.consumo_aguachica), step=0.1, key=f"edit_aguachica_{idx}")
+                        with ecol5:
+                            e_riohacha = st.number_input("Riohacha", min_value=0.0, value=float(t.consumo_riohacha), step=0.1, key=f"edit_riohacha_{idx}")
+                        tipos_disponibles = ["Sencilla", "Dobletroque", "Minimula", "Otro"]
+                        e_tipo = st.selectbox(
+                            "Tipo", tipos_disponibles,
+                            index=tipos_disponibles.index(t.tipo) if t.tipo in tipos_disponibles else 0,
+                            key=f"edit_tipo_{idx}"
+                        )
+                        if st.form_submit_button("💾 Guardar cambios"):
+                            t_editada = Tractomula(
+                                placa=t.placa, consumo_km_galon=e_urbano, tipo=e_tipo,
+                                consumo_urbano=e_urbano, consumo_regional=e_regional,
+                                consumo_frontera=e_frontera, consumo_aguachica=e_aguachica,
+                                consumo_riohacha=e_riohacha
+                            )
+                            if db.actualizar_tractomula(t_editada):
+                                _refrescar_tractomulas(db)
+                                st.success(f"✅ Consumos de {t.placa} actualizados")
+                                st.rerun()
 
     # ==================== TAB 2: RUTAS ====================
     if tab_actual == opciones_tabs[2]:
@@ -2311,6 +2364,26 @@ def main():
                         f"Estos valores ya vienen precargados abajo y puedes editarlos si el viaje es distinto."
                     )
 
+                # ---------------- Consumo km/galón según tipo de ruta ----------------
+                if ruta_obj.es_aguachica:
+                    _tipo_ruta_label = "Aguachica"
+                    _consumo_previo = tractomula_obj.consumo_aguachica
+                elif ruta_obj.es_riohacha:
+                    _tipo_ruta_label = "Riohacha"
+                    _consumo_previo = tractomula_obj.consumo_riohacha
+                elif ruta_obj.es_regional:
+                    _tipo_ruta_label = "Regional"
+                    _consumo_previo = tractomula_obj.consumo_regional
+                elif ruta_obj.es_frontera:
+                    _tipo_ruta_label = "Frontera"
+                    _consumo_previo = tractomula_obj.consumo_frontera
+                else:
+                    _tipo_ruta_label = "Urbano"
+                    _consumo_previo = tractomula_obj.consumo_urbano
+                _consumo_previo = _consumo_previo if _consumo_previo and _consumo_previo > 0 else tractomula_obj.consumo_km_galon
+                st.caption(f"⛽ Consumo que se usará para {tractomula_obj.placa} en esta ruta ({_tipo_ruta_label}): **{_consumo_previo} km/galón**. "
+                           f"Se ajusta en la pestaña '1. Tractomulas'.")
+
                 st.caption("💡 Los campos de gastos variables abajo ya vienen precargados con los valores por defecto de esta ruta (o con los calculados automáticamente para AGOFER). Puedes editarlos si el viaje tuvo un valor distinto.")
 
                 with st.form(key="form_calculo"):
@@ -2429,7 +2502,8 @@ def main():
 
                         st.info(f"🚛 **Comisión Conductor calculada:** ${formatear_numero(costos_preview['comision_conductor'])} "
                                 f"(según la ruta: fija, o $120.000 x {numero_viajes} viaje(s) si es urbana) · "
-                                f"**Distancia efectiva usada en combustible/llantas/aceite:** {formatear_numero(calc_preview.distancia_efectiva)} km")
+                                f"**Distancia efectiva usada en combustible/llantas/aceite:** {formatear_numero(calc_preview.distancia_efectiva)} km · "
+                                f"**Consumo usado:** {calc_preview.obtener_consumo_km_galon()} km/galón ({_tipo_ruta_label})")
 
                     observaciones = st.text_area("Observaciones (opcional)", placeholder="Notas sobre este viaje...")
 
@@ -3237,7 +3311,7 @@ def main():
     # ==================== TAB 10: SOBRECONSUMO DE COMBUSTIBLE ====================
     if tab_actual == opciones_tabs[10]:
         st.header("⛽ Detección de Sobreconsumo de Combustible")
-        st.caption("Compara los galones que TEÓRICAMENTE debió gastar cada viaje (según distancia y rendimiento) contra los galones REALES que compraste. Solo aparecen aquí los viajes donde registraste el dato real.")
+        st.caption("Compara los galones que TEÓRICAMENTE debió gastar cada viaje (según distancia y rendimiento por tipo de ruta) contra los galones REALES que compraste. Solo aparecen aquí los viajes donde registraste el dato real.")
 
         st.info("💡 Para que un viaje aparezca acá, debes ingresar el campo **⛽ Galones Reales Comprados** al calcular el viaje (Tab 4) o al editarlo (Tab 6).")
 
