@@ -928,12 +928,13 @@ class DatabaseManager:
                        default_hotel, default_comida, default_transporte,
                        default_propina_comision, default_cargue_descargue, default_otros
                 FROM rutas
-                ORDER BY origen, destino
+                ORDER BY origen, destino, distancia_km
             """)
 
             rutas = []
             for row in cursor.fetchall():
                 rutas.append(Ruta(
+                    id=row[0],
                     origen=row[1],
                     destino=row[2],
                     distancia_km=row[3],
@@ -962,7 +963,7 @@ class DatabaseManager:
             cursor.execute("""
                 SELECT id, origen, destino, distancia_km, es_frontera, es_regional, es_aguachica, es_riohacha
                 FROM rutas
-                ORDER BY origen, destino
+                ORDER BY origen, destino, distancia_km
             """)
             rutas_con_id = cursor.fetchall()
             return rutas_con_id
@@ -1041,6 +1042,18 @@ class DatabaseManager:
         finally:
             self.release_connection(conn)
 
+    def obtener_total_pendiente_liquidaciones(self):
+        """Devuelve el total a pagar (comisiones) de TODAS las liquidaciones en estado
+        Pendiente, sin importar el conductor. Se usa para el resumen global de Tab 8."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COALESCE(SUM(total_a_pagar),0), COUNT(*) FROM liquidaciones_conductor WHERE estado = 'Pendiente'")
+            row = cursor.fetchone()
+            return {'total': row[0] or 0, 'cantidad': row[1] or 0}
+        finally:
+            self.release_connection(conn)
+
     def marcar_liquidacion_pagada(self, liquidacion_id):
         conn = self.get_connection()
         try:
@@ -1115,6 +1128,29 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM cuentas_por_pagar_cobrar WHERE id = %s", (cuenta_id,))
             conn.commit()
+        finally:
+            self.release_connection(conn)
+
+    # ---------------- Saldo acumulado con conductores (anticipo - legalización) ----------------
+    def obtener_saldo_por_conductor(self):
+        """Suma histórica y permanente de anticipo, legalización y saldo (anticipo - legalización)
+        de TODOS los viajes agrupados por conductor. saldo > 0 => el conductor te debe a ti
+        (le diste más anticipo del que gastó). saldo < 0 => tú le debes a él (gastó más de lo
+        que le diste)."""
+        conn = self.get_connection()
+        try:
+            query = """
+                SELECT conductor,
+                       COALESCE(SUM(anticipo), 0) as total_anticipo,
+                       COALESCE(SUM(legalizacion), 0) as total_legalizacion,
+                       COALESCE(SUM(saldo), 0) as saldo_acumulado,
+                       COUNT(*) as cantidad_viajes
+                FROM viajes_v4
+                GROUP BY conductor
+                ORDER BY conductor
+            """
+            df = pd.read_sql_query(query, conn)
+            return df
         finally:
             self.release_connection(conn)
 
@@ -1210,6 +1246,7 @@ class Ruta:
     default_propina_comision: float = 0.0
     default_cargue_descargue: float = 0.0
     default_otros: float = 0.0
+    id: int = None
 
     @property
     def es_urbana(self) -> bool:
@@ -1280,7 +1317,8 @@ class CalculadoraCostos:
                  comida: float, transporte: float, propina_comision: float,
                  cargue_descargue: float, otros: float, valor_flete: float,
                  anticipo: float, hubo_anticipo_empresa: bool, datos: DatosColombia,
-                 peso: float = 0.0, cliente: str = ""):
+                 peso: float = 0.0, cliente: str = "",
+                 distancia_km_override: float = None, consumo_km_galon_override: float = None):
         self.tractomula = tractomula
         self.conductor = conductor
         self.ruta = ruta
@@ -1303,6 +1341,12 @@ class CalculadoraCostos:
         self.datos = datos
         self.peso = peso
         self.cliente = cliente
+        # Distancia base del viaje: por defecto la de la ruta seleccionada, pero se puede
+        # sobreescribir puntualmente cuando la misma ruta tuvo un recorrido distinto ese día.
+        self.distancia_km_base = distancia_km_override if distancia_km_override and distancia_km_override > 0 else ruta.distancia_km
+        # Consumo km/galón: por defecto el de la tractomula según tipo de ruta, pero editable
+        # puntualmente cuando ese viaje específico tuvo un rendimiento distinto.
+        self.consumo_km_galon_override = consumo_km_galon_override
 
     def aplica_formula_agofer(self) -> bool:
         return self.ruta.es_urbana and not self.es_frontera and es_cliente_agofer(self.cliente)
@@ -1310,8 +1354,8 @@ class CalculadoraCostos:
     @property
     def distancia_efectiva(self) -> float:
         if self.aplica_formula_agofer():
-            return self.ruta.distancia_km * self.numero_viajes
-        return self.ruta.distancia_km
+            return self.distancia_km_base * self.numero_viajes
+        return self.distancia_km_base
 
     def calcular_flete_sugerido_agofer(self) -> float:
         return self.peso * self.datos.AGOFER_VALOR_POR_KG * self.numero_viajes
@@ -1360,7 +1404,11 @@ class CalculadoraCostos:
         return costo_por_km * self.distancia_efectiva
 
     def obtener_consumo_km_galon(self) -> float:
-        """Devuelve el consumo (km/galón) de la tractomula según el TIPO DE RUTA del viaje."""
+        """Devuelve el consumo (km/galón) a usar en este viaje: si el usuario editó puntualmente
+        el consumo para este viaje, se usa ese valor; si no, se usa el de la tractomula según el
+        TIPO DE RUTA del viaje (comportamiento por defecto, sin cambios)."""
+        if self.consumo_km_galon_override and self.consumo_km_galon_override > 0:
+            return self.consumo_km_galon_override
         if self.ruta.es_aguachica:
             consumo = self.tractomula.consumo_aguachica
         elif self.ruta.es_riohacha:
@@ -1853,6 +1901,11 @@ def main():
         st.session_state.conductores = _conductores_cached(st.session_state.db)
     if 'rutas' not in st.session_state:
         st.session_state.rutas = _rutas_cached(st.session_state.db)
+    elif st.session_state.rutas and not hasattr(st.session_state.rutas[0], 'id'):
+        # Sesión con objetos Ruta de una versión anterior (sin el campo id, necesario
+        # para distinguir variantes con el mismo origen/destino y distinto km).
+        _rutas_cached.clear()
+        st.session_state.rutas = st.session_state.db.obtener_rutas()
 
     datos = st.session_state.datos
     db = st.session_state.db
@@ -1884,6 +1937,8 @@ def main():
 **Consumo (km/galón):**
 - Ahora es específico por tractomula Y por tipo de ruta (urbano, regional,
   frontera, Aguachica, Riohacha). Se configura en la pestaña "1. Tractomulas".
+  También se puede ajustar puntualmente para un viaje específico en la
+  pestaña "4. Cálculo de Viaje".
 
 **Automatización Cliente AGOFER (rutas urbanas):**
 - Flete = Peso (kg) x ${formatear_numero(datos.AGOFER_VALOR_POR_KG)} x N° de Viajes
@@ -2177,6 +2232,10 @@ def main():
     if tab_actual == opciones_tabs[2]:
         st.header("Tus Rutas")
         st.caption("💡 Los valores por defecto se autocompletan en cada viaje nuevo con esta ruta (puedes editarlos si cambian).")
+        st.caption("💡 Si el mismo trayecto (origen → destino) puede tener distintos kilometrajes según el día "
+                   "(ej: Palermo → Palermo a veces 15 km, a veces 30 km), simplemente agrégalo aquí de nuevo con "
+                   "el otro valor de km. El sistema guarda ambas como variantes independientes y podrás elegir "
+                   "la correcta por su distancia al momento de calcular el viaje (Tab 4).")
         with st.form(key="form_ruta"):
             col1, col2 = st.columns(2)
             with col1:
@@ -2259,7 +2318,7 @@ def main():
                 )
                 ruta_id = db.guardar_ruta(ruta)
                 _refrescar_rutas(db)
-                st.success(f"✅ Ruta {origen} → {destino} guardada! (ID: {ruta_id})")
+                st.success(f"✅ Ruta {origen} → {destino} ({formatear_numero(distancia_km)} km) guardada! (ID: {ruta_id})")
                 st.rerun()
 
         if st.session_state.rutas:
@@ -2476,8 +2535,19 @@ def main():
                     conductor_obj = next(c for c in st.session_state.conductores if c.nombre == conductor_selec)
 
                 with col2:
-                    ruta_selec = st.selectbox("Selecciona Ruta", [f"{r.origen} → {r.destino}" for r in st.session_state.rutas], key="sel_ruta")
-                    ruta_obj = next(r for r in st.session_state.rutas if f"{r.origen} → {r.destino}" == ruta_selec)
+                    # Las rutas con el mismo origen→destino pero distinta distancia se muestran
+                    # como variantes independientes (con el km en la etiqueta) y se identifican
+                    # por su id, para poder elegir la correcta sin ambigüedad.
+                    rutas_opciones_ids = [r.id for r in st.session_state.rutas]
+
+                    def _etiqueta_ruta(rid):
+                        r = next(rr for rr in st.session_state.rutas if rr.id == rid)
+                        return f"{r.origen} → {r.destino} ({formatear_numero(r.distancia_km)} km)"
+
+                    ruta_id_selec = st.selectbox(
+                        "Selecciona Ruta", rutas_opciones_ids, format_func=_etiqueta_ruta, key="sel_ruta"
+                    )
+                    ruta_obj = next(r for r in st.session_state.rutas if r.id == ruta_id_selec)
                     dias_viaje = st.number_input("Días del viaje", min_value=1, value=1, step=1, key="sel_dias")
                     numero_viajes = st.number_input(
                         "🚛 Número de viajes",
@@ -2508,10 +2578,26 @@ def main():
                     if peso > 0:
                         st.caption(f"⚖️ {formatear_numero(peso)} kg")
 
+                # ---------------- Distancia real de este viaje (editable, opcional) ----------------
+                distancia_override_texto = st.text_input(
+                    "📏 Distancia real de este viaje (km) — opcional",
+                    value="",
+                    placeholder=f"Por defecto: {formatear_numero(ruta_obj.distancia_km)} km (el de la ruta seleccionada)",
+                    help="Solo diligéncialo si este viaje en particular recorrió un km distinto al de la ruta "
+                         "seleccionada. Si lo dejas vacío, se usa el km de la ruta tal cual. Si esta ruta suele "
+                         "tener siempre otro kilometraje, mejor créala como una variante nueva en la pestaña "
+                         "'2. Rutas' para no tener que escribirlo cada vez.",
+                    key="sel_distancia_override"
+                )
+                distancia_override = limpiar_numero(distancia_override_texto) if distancia_override_texto else None
+                if distancia_override and distancia_override > 0:
+                    st.caption(f"📏 Se usará {formatear_numero(distancia_override)} km en vez de los {formatear_numero(ruta_obj.distancia_km)} km de la ruta.")
+
                 aplica_agofer = ruta_obj.es_urbana and es_cliente_agofer(cliente_viaje)
                 flete_sugerido_agofer = peso * datos.AGOFER_VALOR_POR_KG * numero_viajes if aplica_agofer else 0.0
                 cargue_sugerido_agofer = datos.AGOFER_CARGUE_DESCARGUE * numero_viajes if aplica_agofer else 0.0
-                distancia_sugerida_agofer = ruta_obj.distancia_km * numero_viajes if aplica_agofer else ruta_obj.distancia_km
+                _distancia_base_preview = distancia_override if distancia_override and distancia_override > 0 else ruta_obj.distancia_km
+                distancia_sugerida_agofer = _distancia_base_preview * numero_viajes if aplica_agofer else _distancia_base_preview
 
                 if aplica_agofer:
                     st.success(
@@ -2521,7 +2607,7 @@ def main():
                         f"Cargue/Descargue sugerido = ${formatear_numero(cargue_sugerido_agofer)} "
                         f"(${formatear_numero(datos.AGOFER_CARGUE_DESCARGUE)} x {numero_viajes} viaje(s)) · "
                         f"Distancia efectiva del día = {formatear_numero(distancia_sugerida_agofer)} km "
-                        f"({formatear_numero(ruta_obj.distancia_km)} km x {numero_viajes} viaje(s)). "
+                        f"({formatear_numero(_distancia_base_preview)} km x {numero_viajes} viaje(s)). "
                         f"Estos valores ya vienen precargados abajo y puedes editarlos si el viaje es distinto."
                     )
 
@@ -2542,8 +2628,21 @@ def main():
                     _tipo_ruta_label = "Urbano"
                     _consumo_previo = tractomula_obj.consumo_urbano
                 _consumo_previo = _consumo_previo if _consumo_previo and _consumo_previo > 0 else tractomula_obj.consumo_km_galon
-                st.caption(f"⛽ Consumo que se usará para {tractomula_obj.placa} en esta ruta ({_tipo_ruta_label}): **{_consumo_previo} km/galón**. "
-                           f"Se ajusta en la pestaña '1. Tractomulas'.")
+                st.caption(f"⛽ Consumo por defecto para {tractomula_obj.placa} en esta ruta ({_tipo_ruta_label}): **{_consumo_previo} km/galón**. "
+                           f"Se ajusta de forma permanente en la pestaña '1. Tractomulas'.")
+
+                consumo_override_texto = st.text_input(
+                    "⛽ Consumo real de este viaje (km/galón) — opcional",
+                    value="",
+                    placeholder=f"Por defecto: {_consumo_previo} km/galón",
+                    help="Solo diligéncialo si este viaje en particular tuvo un rendimiento distinto al "
+                         "configurado para la tractomula. Si lo dejas vacío, se usa el consumo predeterminado "
+                         "de la pestaña '1. Tractomulas'.",
+                    key="sel_consumo_override"
+                )
+                consumo_override = limpiar_numero(consumo_override_texto) if consumo_override_texto else None
+                if consumo_override and consumo_override > 0:
+                    st.caption(f"⛽ Se usará {consumo_override} km/galón en vez de los {_consumo_previo} km/galón por defecto.")
 
                 st.caption("💡 Los campos de gastos variables abajo ya vienen precargados con los valores por defecto de esta ruta (o con los calculados automáticamente para AGOFER). Puedes editarlos si el viaje tuvo un valor distinto.")
 
@@ -2645,7 +2744,9 @@ def main():
                             flypass, peajes, urea_acpm, hotel, comida, transporte,
                             propina_comision, cargue_descargue, otros,
                             valor_flete, anticipo, hubo_anticipo_empresa, datos,
-                            peso=peso, cliente=cliente_viaje
+                            peso=peso, cliente=cliente_viaje,
+                            distancia_km_override=distancia_override,
+                            consumo_km_galon_override=consumo_override
                         )
                         costos_preview = calc_preview.calcular_costos_totales()
 
@@ -2684,7 +2785,9 @@ def main():
                                 flypass, peajes, urea_acpm, hotel, comida, transporte,
                                 propina_comision, cargue_descargue, otros,
                                 valor_flete, anticipo, hubo_anticipo_empresa, datos,
-                                peso=peso, cliente=cliente_viaje
+                                peso=peso, cliente=cliente_viaje,
+                                distancia_km_override=distancia_override,
+                                consumo_km_galon_override=consumo_override
                             )
                             st.session_state.calculadoras.append(calculadora)
 
@@ -2985,21 +3088,40 @@ def main():
 
                         placas_disponibles = [t.placa for t in st.session_state.tractomulas]
                         conductores_disponibles = [c.nombre for c in st.session_state.conductores]
-                        rutas_disponibles = [f"{r.origen} → {r.destino}" for r in st.session_state.rutas]
 
                         placa_actual = viaje[2]
                         conductor_actual = viaje[3]
-                        ruta_actual_str = f"{viaje[4]} → {viaje[5]}"
 
                         idx_placa = placas_disponibles.index(placa_actual) if placa_actual in placas_disponibles else 0
                         idx_conductor = conductores_disponibles.index(conductor_actual) if conductor_actual in conductores_disponibles else 0
-                        idx_ruta = rutas_disponibles.index(ruta_actual_str) if ruta_actual_str in rutas_disponibles else 0
 
-                        if not placas_disponibles or not conductores_disponibles or not rutas_disponibles:
+                        # Rutas disponibles como variantes por id (mismo criterio que Tab 4)
+                        rutas_ids_disponibles = [r.id for r in st.session_state.rutas]
+
+                        def _etiqueta_ruta_edit(rid):
+                            r = next(rr for rr in st.session_state.rutas if rr.id == rid)
+                            return f"{r.origen} → {r.destino} ({formatear_numero(r.distancia_km)} km)"
+
+                        # Intentar preseleccionar la ruta cuyo origen/destino coincidan con el viaje guardado
+                        ruta_actual_candidatas = [r for r in st.session_state.rutas if r.origen == viaje[4] and r.destino == viaje[5]]
+                        ruta_id_actual = ruta_actual_candidatas[0].id if ruta_actual_candidatas else (rutas_ids_disponibles[0] if rutas_ids_disponibles else None)
+                        idx_ruta = rutas_ids_disponibles.index(ruta_id_actual) if ruta_id_actual in rutas_ids_disponibles else 0
+
+                        if not placas_disponibles or not conductores_disponibles or not rutas_ids_disponibles:
                             st.error("⚠️ No se puede editar: faltan tractomulas, conductores o rutas registradas actualmente.")
                         else:
-                            edit_ruta_str_preview = st.selectbox("Ruta", rutas_disponibles, index=idx_ruta, key="edit_ruta_preview")
-                            edit_ruta_obj_preview = next(r for r in st.session_state.rutas if f"{r.origen} → {r.destino}" == edit_ruta_str_preview)
+                            edit_ruta_id_preview = st.selectbox(
+                                "Ruta", rutas_ids_disponibles, format_func=_etiqueta_ruta_edit,
+                                index=idx_ruta, key="edit_ruta_preview"
+                            )
+                            edit_ruta_obj_preview = next(r for r in st.session_state.rutas if r.id == edit_ruta_id_preview)
+                            edit_distancia_override_texto = st.text_input(
+                                "📏 Distancia real de este viaje (km) — opcional",
+                                value=formatear_numero(viaje[6]) if viaje[6] and float(viaje[6]) != edit_ruta_obj_preview.distancia_km else "",
+                                placeholder=f"Por defecto: {formatear_numero(edit_ruta_obj_preview.distancia_km)} km",
+                                key="edit_distancia_override"
+                            )
+                            edit_distancia_override = limpiar_numero(edit_distancia_override_texto) if edit_distancia_override_texto else None
                             edit_numero_viajes_preview = st.number_input(
                                 "🚛 Número de viajes", min_value=1,
                                 value=int(viaje[46]) if len(viaje) > 46 and viaje[46] else 1,
@@ -3023,8 +3145,7 @@ def main():
                             if edit_aplica_agofer:
                                 st.success(
                                     f"🤖 Automatización AGOFER activa: Flete sugerido ${formatear_numero(edit_flete_sugerido)} · "
-                                    f"Cargue/Descargue sugerido ${formatear_numero(edit_cargue_sugerido)} · "
-                                    f"Distancia efectiva sugerida {formatear_numero(edit_ruta_obj_preview.distancia_km * edit_numero_viajes_preview)} km"
+                                    f"Cargue/Descargue sugerido ${formatear_numero(edit_cargue_sugerido)}"
                                 )
 
                             with st.form(key="form_editar_viaje"):
@@ -3042,6 +3163,11 @@ def main():
                                     edit_es_frontera = st.checkbox("¿Es viaje a frontera?", value=bool(viaje[8]), key="edit_frontera")
                                     edit_hubo_parqueo = st.checkbox("¿Hubo parqueo?", value=bool(viaje[9]), key="edit_parqueo")
                                     edit_hubo_ant_empresa = st.checkbox("¿Hubo anticipo empresa?", value=bool(viaje[36]), key="edit_ant_empresa")
+                                    edit_consumo_override_texto = st.text_input(
+                                        "⛽ Consumo real de este viaje (km/galón) — opcional",
+                                        value="", placeholder="Dejar vacío para usar el de la tractomula",
+                                        key="edit_consumo_override"
+                                    )
 
                                 col1, col2, col3 = st.columns(3)
                                 with col1:
@@ -3101,6 +3227,7 @@ def main():
                                     edit_numero_viajes = edit_numero_viajes_preview
                                     edit_cliente = edit_cliente_preview
                                     edit_peso = edit_peso_preview
+                                    edit_consumo_override = limpiar_numero(edit_consumo_override_texto) if edit_consumo_override_texto else None
 
                                     calculadora_editada = CalculadoraCostos(
                                         edit_tractomula_obj, edit_conductor_obj, edit_ruta_obj,
@@ -3108,7 +3235,9 @@ def main():
                                         edit_flypass, edit_peajes, edit_urea, edit_hotel, edit_comida,
                                         edit_transporte, edit_propina, edit_cargue, edit_otros,
                                         edit_valor_flete, edit_anticipo, edit_hubo_ant_empresa, datos,
-                                        peso=edit_peso, cliente=edit_cliente
+                                        peso=edit_peso, cliente=edit_cliente,
+                                        distancia_km_override=edit_distancia_override,
+                                        consumo_km_galon_override=edit_consumo_override
                                     )
                                     exito = db.actualizar_viaje(viaje_id_seleccionado, calculadora_editada, edit_fecha_viaje, edit_observaciones, edit_cliente)
                                     if exito:
@@ -3272,6 +3401,14 @@ def main():
         st.header("💵 Liquidaciones de Conductores")
         st.caption("Muestra cuántos viajes hizo el conductor, en qué placas, y el Total de Comisiones a pagar en el periodo (ej. quincena).")
 
+        # ---------------- Resumen global (todos los conductores, sin filtro) ----------------
+        resumen_global_liq = db.obtener_total_pendiente_liquidaciones()
+        st.info(
+            f"💰 **Total Pendiente por Pagar (TODOS los conductores):** "
+            f"${formatear_numero(resumen_global_liq['total'])} "
+            f"— {resumen_global_liq['cantidad']} liquidación(es) pendiente(s)"
+        )
+
         st.subheader("📝 Generar Nueva Liquidación")
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -3350,9 +3487,9 @@ def main():
             total_pendiente_liq = df_liquidaciones[df_liquidaciones['estado'] == 'Pendiente']['total_a_pagar'].sum()
             col1, col2 = st.columns(2)
             with col1:
-                st.metric("Total Liquidaciones", len(df_liquidaciones))
+                st.metric("Total Liquidaciones (filtro actual)", len(df_liquidaciones))
             with col2:
-                st.metric("💰 Total Pendiente por Pagar", f"${formatear_numero(total_pendiente_liq)}")
+                st.metric("💰 Total Pendiente por Pagar (filtro actual)", f"${formatear_numero(total_pendiente_liq)}")
 
             for _, liq in df_liquidaciones.iterrows():
                 estado_icono = "🟢" if liq['estado'] == 'Pagada' else "🟡"
@@ -3385,6 +3522,54 @@ def main():
     if tab_actual == opciones_tabs[9]:
         st.header("⏰ Pagos Pendientes y Vencimientos")
         st.caption("Controla lo que te deben (Por Cobrar: fletes de clientes) y lo que debes (Por Pagar: seguros, liquidaciones, proveedores, etc).")
+
+        # ---------------- NUEVO: Saldo acumulado con conductores (anticipo - legalización) ----------------
+        st.subheader("💰 Saldo con Conductores (Anticipo vs. Legalización)")
+        st.caption("Acumulado histórico de todos los viajes: si le diste más anticipo del que gastó, el conductor "
+                   "**te debe a ti**. Si gastó más de lo que le diste, **tú le debes a él**.")
+
+        df_saldo_conductores = db.obtener_saldo_por_conductor()
+        if df_saldo_conductores.empty:
+            st.info("No hay viajes registrados todavía para calcular saldos.")
+        else:
+            total_te_deben = df_saldo_conductores[df_saldo_conductores['saldo_acumulado'] > 0]['saldo_acumulado'].sum()
+            total_les_debes = -df_saldo_conductores[df_saldo_conductores['saldo_acumulado'] < 0]['saldo_acumulado'].sum()
+
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("💚 Total que te deben (conductores)", f"${formatear_numero(total_te_deben)}")
+            with col2:
+                st.metric("🔴 Total que les debes (conductores)", f"${formatear_numero(total_les_debes)}")
+
+            for _, fila in df_saldo_conductores.iterrows():
+                saldo = fila['saldo_acumulado']
+                if saldo > 0:
+                    icono = "💚"
+                    estado_txt = f"**Te debe:** ${formatear_numero(saldo)}"
+                elif saldo < 0:
+                    icono = "🔴"
+                    estado_txt = f"**Le debes:** ${formatear_numero(abs(saldo))}"
+                else:
+                    icono = "⚪"
+                    estado_txt = "**Saldado** ($0)"
+
+                with st.expander(f"{icono} {fila['conductor']} — {estado_txt}"):
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.write(f"**Conductor:** {fila['conductor']}")
+                        st.write(f"**Viajes registrados:** {fila['cantidad_viajes']}")
+                    with col2:
+                        st.write(f"**Total Anticipos dados:** ${formatear_numero(fila['total_anticipo'])}")
+                        st.write(f"**Total Legalizado (gastado):** ${formatear_numero(fila['total_legalizacion'])}")
+                    with col3:
+                        if saldo > 0:
+                            st.success(estado_txt)
+                        elif saldo < 0:
+                            st.error(estado_txt)
+                        else:
+                            st.info(estado_txt)
+
+        st.divider()
 
         st.subheader("➕ Registrar Nueva Cuenta")
         with st.form(key="form_cuenta"):
