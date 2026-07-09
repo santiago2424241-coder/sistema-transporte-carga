@@ -3455,7 +3455,50 @@ def main():
                     st.write(f"${formatear_numero(fila['total_comision'])}")
                 st.divider()
 
+        # ---------------- Detalle de viajes por conductor (filtrable) ----------------
+        st.subheader("🔍 Ver Viajes de un Conductor")
+        st.caption("Filtra por conductor (y opcionalmente por fecha) para ver uno por uno los viajes que hizo, con su comisión.")
+
+        conductores_nombres_liq = [c.nombre for c in st.session_state.conductores] if st.session_state.conductores else []
+        if not conductores_nombres_liq:
+            st.warning("Primero registra conductores en la pestaña 3.")
+        else:
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                conductor_filtro_liq = st.selectbox("Conductor", conductores_nombres_liq, key="liq_detalle_conductor")
+            with col2:
+                fecha_inicio_liq_f = st.date_input("Desde (opcional)", value=None, key="liq_detalle_desde")
+            with col3:
+                fecha_fin_liq_f = st.date_input("Hasta (opcional)", value=None, key="liq_detalle_hasta")
+
+            fecha_ini_str_liq = fecha_inicio_liq_f.strftime('%Y-%m-%d') if fecha_inicio_liq_f else None
+            fecha_fin_str_liq = fecha_fin_liq_f.strftime('%Y-%m-%d') if fecha_fin_liq_f else None
+
+            df_detalle_liq = db.buscar_viajes(fecha_ini_str_liq, fecha_fin_str_liq, None, conductor_filtro_liq, None, None, None)
+            if not df_detalle_liq.empty:
+                # buscar_viajes filtra conductor con ILIKE (coincidencia parcial); nos aseguramos
+                # de dejar solo el conductor exacto seleccionado.
+                df_detalle_liq = df_detalle_liq[df_detalle_liq['conductor'] == conductor_filtro_liq]
+
+            if df_detalle_liq.empty:
+                st.info("No se encontraron viajes de este conductor con estos filtros.")
+            else:
+                cantidad_viajes_filtro = int(df_detalle_liq['numero_viajes'].fillna(1).sum())
+                total_comision_filtro = float(df_detalle_liq['comision_conductor'].sum())
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("🚛 Cantidad de Viajes", cantidad_viajes_filtro)
+                with col2:
+                    st.metric("💰 Total Comisión", f"${formatear_numero(total_comision_filtro)}")
+
+                df_mostrar_detalle_liq = df_detalle_liq[['id', 'fecha_viaje', 'placa', 'origen', 'destino', 'comision_conductor', 'numero_viajes']].copy()
+                df_mostrar_detalle_liq['comision_conductor'] = df_mostrar_detalle_liq['comision_conductor'].apply(lambda x: f"${formatear_numero(x)}")
+                df_mostrar_detalle_liq.columns = ['ID', 'Fecha Viaje', 'Placa', 'Origen', 'Destino', 'Comisión', 'N° Viajes']
+                st.dataframe(df_mostrar_detalle_liq, use_container_width=True, hide_index=True)
+
         # ---------------- Saldo con Conductores (Anticipo vs. Legalización) ----------------
+        st.divider()
         st.subheader("💰 Saldo con Conductores (Anticipo vs. Legalización)")
         st.caption("Acumulado histórico de todos los viajes: si le diste más anticipo del que gastó, el conductor "
                    "**te debe a ti**. Si gastó más de lo que le diste, **tú le debes a él**. Despliega cada "
