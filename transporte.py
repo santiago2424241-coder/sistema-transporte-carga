@@ -1154,6 +1154,44 @@ class DatabaseManager:
         finally:
             self.release_connection(conn)
 
+    def obtener_viajes_saldo_conductor(self, conductor):
+        """Detalle viaje por viaje (fecha, ruta, placa, anticipo, legalización, saldo) de UN
+        conductor específico, solo los viajes donde hubo anticipo o legalización (es decir,
+        donde de verdad se movió plata), para poder mostrar el motivo puntual de cada
+        diferencia en el saldo acumulado."""
+        conn = self.get_connection()
+        try:
+            query = """
+                SELECT id, fecha_viaje, placa, origen, destino, anticipo, legalizacion, saldo
+                FROM viajes_v4
+                WHERE conductor = %s AND (COALESCE(anticipo,0) > 0 OR COALESCE(legalizacion,0) > 0)
+                ORDER BY fecha_viaje DESC
+            """
+            df = pd.read_sql_query(query, conn, params=[conductor])
+            return df
+        finally:
+            self.release_connection(conn)
+
+    # ---------------- Comisiones a pagar por conductor (reporte simple, sin liquidaciones guardadas) ----------------
+    def obtener_comisiones_por_conductor(self):
+        """Suma histórica de comisión de conductor (lo que se le debe pagar por sus viajes)
+        agrupada por conductor. Es un reporte en vivo calculado directamente de los viajes,
+        sin depender de registros de liquidación guardados."""
+        conn = self.get_connection()
+        try:
+            query = """
+                SELECT conductor,
+                       COALESCE(SUM(comision_conductor), 0) as total_comision,
+                       COALESCE(SUM(numero_viajes), 0) as cantidad_viajes
+                FROM viajes_v4
+                GROUP BY conductor
+                ORDER BY conductor
+            """
+            df = pd.read_sql_query(query, conn)
+            return df
+        finally:
+            self.release_connection(conn)
+
     # ---------------- NUEVO v4.8: Métodos para Días Sin Viaje ----------------
     def guardar_dia_sin_viaje(self, fecha, placa, conductor="", motivo="", observaciones=""):
         """Registra un día en el que la tractomula NO hizo viaje. Solo para trazabilidad,
@@ -3397,130 +3435,31 @@ def main():
     # ==================== TAB 8: LIQUIDACIONES DE CONDUCTORES ====================
     if tab_actual == opciones_tabs[8]:
         st.header("💵 Liquidaciones de Conductores")
-        st.caption("Muestra cuántos viajes hizo el conductor, en qué placas, y el Total de Comisiones a pagar en el periodo (ej. quincena).")
+        st.caption("Total de comisiones a pagar por conductor (calculado en vivo a partir de todos sus viajes registrados) y el total general de todos los conductores.")
 
-        # ---------------- Resumen global (todos los conductores, sin filtro) ----------------
-        resumen_global_liq = db.obtener_total_pendiente_liquidaciones()
-        st.info(
-            f"💰 **Total Pendiente por Pagar (TODOS los conductores):** "
-            f"${formatear_numero(resumen_global_liq['total'])} "
-            f"— {resumen_global_liq['cantidad']} liquidación(es) pendiente(s)"
-        )
+        df_comisiones = db.obtener_comisiones_por_conductor()
 
-        st.subheader("📝 Generar Nueva Liquidación")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            conductores_nombres = [c.nombre for c in st.session_state.conductores] if st.session_state.conductores else []
-            if conductores_nombres:
-                conductor_liq = st.selectbox("Conductor", conductores_nombres, key="liq_conductor")
-            else:
-                conductor_liq = None
-                st.warning("Primero registra conductores en la pestaña 3.")
-        with col2:
-            periodo_inicio_liq = st.date_input("Periodo Desde", value=datetime.now().replace(day=1).date(), key="liq_inicio")
-        with col3:
-            periodo_fin_liq = st.date_input("Periodo Hasta", value=datetime.now().date(), key="liq_fin")
-
-        if conductor_liq and st.button("🔍 Buscar Viajes del Periodo", key="liq_buscar"):
-            df_viajes_liq = db.obtener_viajes_para_liquidar(conductor_liq, periodo_inicio_liq, periodo_fin_liq)
-            st.session_state.df_viajes_liq = df_viajes_liq
-            st.session_state.conductor_liq_actual = conductor_liq
-            st.session_state.periodo_liq_actual = (periodo_inicio_liq, periodo_fin_liq)
-
-        if 'df_viajes_liq' in st.session_state and not st.session_state.df_viajes_liq.empty:
-            df_viajes_liq = st.session_state.df_viajes_liq
-            st.success(f"Se encontraron {len(df_viajes_liq)} viajes de {st.session_state.conductor_liq_actual} en el periodo seleccionado.")
-
-            df_mostrar_liq = df_viajes_liq.copy()
-            df_mostrar_liq['comision_conductor'] = df_mostrar_liq['comision_conductor'].apply(lambda x: f"${formatear_numero(x)}")
-            df_mostrar_liq.columns = ['ID', 'Fecha Viaje', 'Placa', 'Origen', 'Destino', 'Comisión', 'N° Viajes']
-            st.dataframe(df_mostrar_liq, use_container_width=True, hide_index=True)
-
-            cantidad_viajes_preview = int(df_viajes_liq['numero_viajes'].fillna(1).sum())
-            placas_preview = ", ".join(sorted(df_viajes_liq['placa'].unique()))
-            total_comisiones_preview = float(df_viajes_liq['comision_conductor'].sum())
-
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("🚛 Cantidad de Viajes", cantidad_viajes_preview)
-            with col2:
-                st.metric("💰 TOTAL A PAGAR (Comisiones)", f"${formatear_numero(total_comisiones_preview)}")
-
-            observaciones_liq = st.text_area("Observaciones de la liquidación (opcional)", key="liq_obs")
-
-            if st.button("💾 Guardar Liquidación", type="primary", key="liq_guardar"):
-                liquidacion_id, n_viajes, placas_liq, t_com, t_pagar = db.guardar_liquidacion(
-                    st.session_state.conductor_liq_actual,
-                    st.session_state.periodo_liq_actual[0],
-                    st.session_state.periodo_liq_actual[1],
-                    df_viajes_liq,
-                    observaciones_liq
-                )
-                st.success(f"✅ Liquidación guardada (ID: {liquidacion_id}) — Total a pagar: ${formatear_numero(t_pagar)}")
-                del st.session_state.df_viajes_liq
-                st.rerun()
-        elif 'df_viajes_liq' in st.session_state:
-            st.info("No se encontraron viajes de este conductor en el periodo seleccionado.")
-
-        st.divider()
-        st.subheader("📋 Liquidaciones Registradas")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            filtro_conductor_liq = st.selectbox(
-                "Filtrar por conductor",
-                ["Todos"] + [c.nombre for c in st.session_state.conductores],
-                key="filtro_liq_conductor"
-            )
-        with col2:
-            filtro_estado_liq = st.selectbox("Filtrar por estado", ["Todos", "Pendiente", "Pagada"], key="filtro_liq_estado")
-
-        cond_f = None if filtro_conductor_liq == "Todos" else filtro_conductor_liq
-        est_f = None if filtro_estado_liq == "Todos" else filtro_estado_liq
-        df_liquidaciones = db.obtener_liquidaciones(cond_f, est_f)
-
-        if df_liquidaciones.empty:
-            st.info("No hay liquidaciones registradas con estos filtros.")
+        if df_comisiones.empty:
+            st.info("No hay viajes registrados todavía para calcular comisiones.")
         else:
-            total_pendiente_liq = df_liquidaciones[df_liquidaciones['estado'] == 'Pendiente']['total_a_pagar'].sum()
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Total Liquidaciones (filtro actual)", len(df_liquidaciones))
-            with col2:
-                st.metric("💰 Total Pendiente por Pagar (filtro actual)", f"${formatear_numero(total_pendiente_liq)}")
+            total_general_comisiones = float(df_comisiones['total_comision'].sum())
+            st.info(f"💰 **TOTAL A PAGAR (Comisiones) — TODOS los conductores:** ${formatear_numero(total_general_comisiones)}")
 
-            for _, liq in df_liquidaciones.iterrows():
-                estado_icono = "🟢" if liq['estado'] == 'Pagada' else "🟡"
-                with st.expander(f"{estado_icono} {liq['conductor']} | {liq['periodo_inicio']} → {liq['periodo_fin']} | ${formatear_numero(liq['total_a_pagar'])} | {liq['estado']}"):
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.write(f"**Conductor:** {liq['conductor']}")
-                        st.write(f"**Periodo:** {liq['periodo_inicio']} a {liq['periodo_fin']}")
-                        st.write(f"**🚛 Cantidad de Viajes:** {liq['cantidad_viajes']}")
-                    with col2:
-                        st.write(f"**💰 TOTAL A PAGAR (Comisiones):** ${formatear_numero(liq['total_a_pagar'])}")
-                        st.write(f"**Estado:** {liq['estado']}" + (f" (pagada el {liq['fecha_pago']})" if liq['fecha_pago'] else ""))
-                    if liq['observaciones']:
-                        st.caption(f"📝 {liq['observaciones']}")
-
-                    col_a, col_b = st.columns(2)
-                    with col_a:
-                        if liq['estado'] == 'Pendiente':
-                            if st.button("✅ Marcar como Pagada", key=f"pagar_liq_{liq['id']}"):
-                                db.marcar_liquidacion_pagada(liq['id'])
-                                st.success("Liquidación marcada como pagada")
-                                st.rerun()
-                    with col_b:
-                        if st.button("🗑️ Eliminar", key=f"eliminar_liq_{liq['id']}"):
-                            db.eliminar_liquidacion(liq['id'])
-                            st.success("Liquidación eliminada")
-                            st.rerun()
+            st.subheader("📋 Comisión a Pagar por Conductor")
+            for _, fila in df_comisiones.iterrows():
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.write(f"**{fila['conductor']}**")
+                    st.caption(f"🚛 {int(fila['cantidad_viajes'])} viajes")
+                with col2:
+                    st.write(f"${formatear_numero(fila['total_comision'])}")
+                st.divider()
 
         # ---------------- Saldo con Conductores (Anticipo vs. Legalización) ----------------
-        st.divider()
         st.subheader("💰 Saldo con Conductores (Anticipo vs. Legalización)")
         st.caption("Acumulado histórico de todos los viajes: si le diste más anticipo del que gastó, el conductor "
-                   "**te debe a ti**. Si gastó más de lo que le diste, **tú le debes a él**.")
+                   "**te debe a ti**. Si gastó más de lo que le diste, **tú le debes a él**. Despliega cada "
+                   "conductor para ver la fecha y el viaje puntual que generó cada diferencia.")
 
         df_saldo_conductores = db.obtener_saldo_por_conductor()
         if df_saldo_conductores.empty:
@@ -3563,6 +3502,29 @@ def main():
                         else:
                             st.info(estado_txt)
 
+                    st.markdown("**📅 Detalle viaje por viaje:**")
+                    df_detalle_saldo = db.obtener_viajes_saldo_conductor(fila['conductor'])
+                    if df_detalle_saldo.empty:
+                        st.caption("No hay viajes con anticipo o legalización registrados.")
+                    else:
+                        df_detalle_mostrar = df_detalle_saldo.copy()
+                        df_detalle_mostrar['ruta'] = df_detalle_mostrar['origen'] + " → " + df_detalle_mostrar['destino']
+
+                        def _motivo_saldo(s):
+                            if s > 0:
+                                return "🟢 Le sobró anticipo (te debe)"
+                            elif s < 0:
+                                return "🔴 Gastó más del anticipo (le debes)"
+                            else:
+                                return "⚪ Sin diferencia"
+
+                        df_detalle_mostrar['motivo'] = df_detalle_mostrar['saldo'].apply(_motivo_saldo)
+                        df_detalle_mostrar['anticipo'] = df_detalle_mostrar['anticipo'].apply(lambda x: f"${formatear_numero(x)}")
+                        df_detalle_mostrar['legalizacion'] = df_detalle_mostrar['legalizacion'].apply(lambda x: f"${formatear_numero(x)}")
+                        df_detalle_mostrar['saldo'] = df_detalle_mostrar['saldo'].apply(lambda x: f"${formatear_numero(x)}")
+                        df_detalle_mostrar = df_detalle_mostrar[['fecha_viaje', 'placa', 'ruta', 'anticipo', 'legalizacion', 'saldo', 'motivo']]
+                        df_detalle_mostrar.columns = ['Fecha', 'Placa', 'Ruta', 'Anticipo', 'Legalización', 'Saldo', 'Motivo']
+                        st.dataframe(df_detalle_mostrar, use_container_width=True, hide_index=True)
 
 if __name__ == "__main__":
     main()
