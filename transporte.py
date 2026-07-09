@@ -315,6 +315,19 @@ class DatabaseManager:
                 )
             ''')
 
+            # ---------------- Conciliaciones de saldo con conductores (pagos/cobros) ----------------
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS conciliaciones_saldo_conductor (
+                    id SERIAL PRIMARY KEY,
+                    conductor TEXT NOT NULL,
+                    fecha DATE NOT NULL,
+                    tipo TEXT NOT NULL,
+                    monto REAL NOT NULL,
+                    observaciones TEXT,
+                    fecha_creacion TEXT
+                )
+            ''')
+
             conn.commit()
             _db_initialized = True
         except Exception as e:
@@ -1172,7 +1185,77 @@ class DatabaseManager:
         finally:
             self.release_connection(conn)
 
-    # ---------------- Comisiones a pagar por conductor (reporte simple, sin liquidaciones guardadas) ----------------
+    # ---------------- Conciliaciones de saldo con conductores (marcar pagado/cobrado) ----------------
+    def guardar_conciliacion_saldo(self, conductor, fecha, tipo, monto, observaciones=""):
+        """Registra que se PAGÓ al conductor lo que se le debía (tipo='pago') o que se le
+        COBRÓ lo que él debía (tipo='cobro'). Esto no borra el histórico de viajes, solo
+        ajusta el saldo pendiente mostrado hacia adelante."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            hora_colombia = datetime.now() - timedelta(hours=5)
+            fecha_creacion = hora_colombia.strftime('%Y-%m-%d %H:%M:%S')
+            fecha_str = fecha.strftime('%Y-%m-%d') if hasattr(fecha, 'strftime') else fecha
+            cursor.execute('''
+                INSERT INTO conciliaciones_saldo_conductor (conductor, fecha, tipo, monto, observaciones, fecha_creacion)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id
+            ''', (conductor, fecha_str, tipo, monto, observaciones, fecha_creacion))
+            result = cursor.fetchone()
+            conciliacion_id = result[0] if result else None
+            conn.commit()
+            return conciliacion_id
+        except Exception as e:
+            st.error(f"❌ Error al registrar la conciliación: {e}")
+            return None
+        finally:
+            self.release_connection(conn)
+
+    def obtener_conciliaciones_saldo(self, conductor=None):
+        conn = self.get_connection()
+        try:
+            query = "SELECT * FROM conciliaciones_saldo_conductor WHERE 1=1"
+            params = []
+            if conductor:
+                query += " AND conductor = %s"
+                params.append(conductor)
+            query += " ORDER BY fecha DESC"
+            df = pd.read_sql_query(query, conn, params=params)
+            return df
+        finally:
+            self.release_connection(conn)
+
+    def eliminar_conciliacion_saldo(self, conciliacion_id):
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM conciliaciones_saldo_conductor WHERE id = %s", (conciliacion_id,))
+            conn.commit()
+        finally:
+            self.release_connection(conn)
+
+    def obtener_ajuste_neto_por_conductor(self):
+        """Ajuste neto por conductor a partir de las conciliaciones registradas:
+        pagos (lo que le pagaste de lo que le debías) suman al saldo pendiente (lo acercan a 0
+        desde negativo), cobros (lo que le cobraste de lo que te debía) restan al saldo
+        pendiente (lo acercan a 0 desde positivo)."""
+        conn = self.get_connection()
+        try:
+            query = """
+                SELECT conductor,
+                       COALESCE(SUM(CASE WHEN tipo = 'pago' THEN monto ELSE 0 END), 0) as total_pagado,
+                       COALESCE(SUM(CASE WHEN tipo = 'cobro' THEN monto ELSE 0 END), 0) as total_cobrado
+                FROM conciliaciones_saldo_conductor
+                GROUP BY conductor
+            """
+            df = pd.read_sql_query(query, conn)
+            if not df.empty:
+                df['ajuste_neto'] = df['total_pagado'] - df['total_cobrado']
+            return df
+        finally:
+            self.release_connection(conn)
+
+
     def obtener_comisiones_por_conductor(self):
         """Suma histórica de comisión de conductor (lo que se le debe pagar por sus viajes)
         agrupada por conductor. Es un reporte en vivo calculado directamente de los viajes,
@@ -3435,27 +3518,8 @@ def main():
     # ==================== TAB 8: LIQUIDACIONES DE CONDUCTORES ====================
     if tab_actual == opciones_tabs[8]:
         st.header("💵 Liquidaciones de Conductores")
-        st.caption("Total de comisiones a pagar por conductor (calculado en vivo a partir de todos sus viajes registrados) y el total general de todos los conductores.")
 
-        df_comisiones = db.obtener_comisiones_por_conductor()
-
-        if df_comisiones.empty:
-            st.info("No hay viajes registrados todavía para calcular comisiones.")
-        else:
-            total_general_comisiones = float(df_comisiones['total_comision'].sum())
-            st.info(f"💰 **TOTAL A PAGAR (Comisiones) — TODOS los conductores:** ${formatear_numero(total_general_comisiones)}")
-
-            st.subheader("📋 Comisión a Pagar por Conductor")
-            for _, fila in df_comisiones.iterrows():
-                col1, col2 = st.columns([3, 1])
-                with col1:
-                    st.write(f"**{fila['conductor']}**")
-                    st.caption(f"🚛 {int(fila['cantidad_viajes'])} viajes")
-                with col2:
-                    st.write(f"${formatear_numero(fila['total_comision'])}")
-                st.divider()
-
-        # ---------------- Detalle de viajes por conductor (filtrable) ----------------
+        # ---------------- 1. Ver Viajes de un Conductor ----------------
         st.subheader("🔍 Ver Viajes de un Conductor")
         st.caption("Filtra por conductor (y opcionalmente por fecha) para ver uno por uno los viajes que hizo, con su comisión.")
 
@@ -3497,19 +3561,32 @@ def main():
                 df_mostrar_detalle_liq.columns = ['ID', 'Fecha Viaje', 'Placa', 'Origen', 'Destino', 'Comisión', 'N° Viajes']
                 st.dataframe(df_mostrar_detalle_liq, use_container_width=True, hide_index=True)
 
-        # ---------------- Saldo con Conductores (Anticipo vs. Legalización) ----------------
+        # ---------------- 2. Saldo con Conductores (Anticipo vs. Legalización) ----------------
         st.divider()
         st.subheader("💰 Saldo con Conductores (Anticipo vs. Legalización)")
         st.caption("Acumulado histórico de todos los viajes: si le diste más anticipo del que gastó, el conductor "
                    "**te debe a ti**. Si gastó más de lo que le diste, **tú le debes a él**. Despliega cada "
-                   "conductor para ver la fecha y el viaje puntual que generó cada diferencia.")
+                   "conductor para ver la fecha y el viaje puntual que generó cada diferencia, y para registrar "
+                   "cuando ya le pagaste lo que le debías o ya le cobraste lo que te debía.")
 
         df_saldo_conductores = db.obtener_saldo_por_conductor()
+        df_ajustes_saldo = db.obtener_ajuste_neto_por_conductor()
+
         if df_saldo_conductores.empty:
             st.info("No hay viajes registrados todavía para calcular saldos.")
         else:
-            total_te_deben = df_saldo_conductores[df_saldo_conductores['saldo_acumulado'] > 0]['saldo_acumulado'].sum()
-            total_les_debes = -df_saldo_conductores[df_saldo_conductores['saldo_acumulado'] < 0]['saldo_acumulado'].sum()
+            # Aplicar los ajustes de conciliación (pagos/cobros ya registrados) al saldo histórico
+            # para obtener el saldo PENDIENTE real.
+            df_saldo_conductores = df_saldo_conductores.copy()
+            if not df_ajustes_saldo.empty:
+                mapa_ajustes = dict(zip(df_ajustes_saldo['conductor'], df_ajustes_saldo['ajuste_neto']))
+            else:
+                mapa_ajustes = {}
+            df_saldo_conductores['ajuste_neto'] = df_saldo_conductores['conductor'].map(mapa_ajustes).fillna(0)
+            df_saldo_conductores['saldo_pendiente'] = df_saldo_conductores['saldo_acumulado'] + df_saldo_conductores['ajuste_neto']
+
+            total_te_deben = df_saldo_conductores[df_saldo_conductores['saldo_pendiente'] > 0]['saldo_pendiente'].sum()
+            total_les_debes = -df_saldo_conductores[df_saldo_conductores['saldo_pendiente'] < 0]['saldo_pendiente'].sum()
 
             col1, col2 = st.columns(2)
             with col1:
@@ -3518,7 +3595,8 @@ def main():
                 st.metric("🔴 Total que les debes (conductores)", f"${formatear_numero(total_les_debes)}")
 
             for _, fila in df_saldo_conductores.iterrows():
-                saldo = fila['saldo_acumulado']
+                saldo_hist = fila['saldo_acumulado']
+                saldo = fila['saldo_pendiente']
                 if saldo > 0:
                     icono = "💚"
                     estado_txt = f"**Te debe:** ${formatear_numero(saldo)}"
@@ -3538,6 +3616,8 @@ def main():
                         st.write(f"**Total Anticipos dados:** ${formatear_numero(fila['total_anticipo'])}")
                         st.write(f"**Total Legalizado (gastado):** ${formatear_numero(fila['total_legalizacion'])}")
                     with col3:
+                        if fila['ajuste_neto']:
+                            st.caption(f"Saldo histórico: ${formatear_numero(saldo_hist)} · Ya conciliado: ${formatear_numero(fila['ajuste_neto'])}")
                         if saldo > 0:
                             st.success(estado_txt)
                         elif saldo < 0:
@@ -3568,6 +3648,74 @@ def main():
                         df_detalle_mostrar = df_detalle_mostrar[['fecha_viaje', 'placa', 'ruta', 'anticipo', 'legalizacion', 'saldo', 'motivo']]
                         df_detalle_mostrar.columns = ['Fecha', 'Placa', 'Ruta', 'Anticipo', 'Legalización', 'Saldo', 'Motivo']
                         st.dataframe(df_detalle_mostrar, use_container_width=True, hide_index=True)
+
+                    st.markdown("**✅ Registrar pago o cobro:**")
+                    with st.form(key=f"form_conciliacion_{fila['conductor']}"):
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            tipo_conciliacion = st.selectbox(
+                                "¿Qué pasó?",
+                                ["💸 Le pagué lo que le debía", "💰 Le cobré lo que me debía"],
+                                key=f"tipo_conciliacion_{fila['conductor']}"
+                            )
+                        with col2:
+                            fecha_conciliacion = st.date_input("Fecha", value=datetime.now().date(), key=f"fecha_conciliacion_{fila['conductor']}")
+
+                        monto_conciliacion_texto = st.text_input(
+                            "Monto (COP)", value="", placeholder="0", key=f"monto_conciliacion_{fila['conductor']}"
+                        )
+                        monto_conciliacion = limpiar_numero(monto_conciliacion_texto)
+                        if monto_conciliacion > 0:
+                            st.caption(f"💵 {formatear_numero(monto_conciliacion)}")
+
+                        obs_conciliacion = st.text_input("Observaciones (opcional)", key=f"obs_conciliacion_{fila['conductor']}")
+
+                        if st.form_submit_button("💾 Registrar"):
+                            if monto_conciliacion <= 0:
+                                st.error("⚠️ Ingresa un monto mayor a cero.")
+                            else:
+                                tipo_bd = "pago" if tipo_conciliacion.startswith("💸") else "cobro"
+                                db.guardar_conciliacion_saldo(fila['conductor'], fecha_conciliacion, tipo_bd, monto_conciliacion, obs_conciliacion)
+                                st.success("✅ Registrado. El saldo pendiente se actualizó.")
+                                st.rerun()
+
+                    df_historial_conciliaciones = db.obtener_conciliaciones_saldo(fila['conductor'])
+                    if not df_historial_conciliaciones.empty:
+                        st.markdown("**🧾 Historial de pagos/cobros registrados:**")
+                        df_hist_mostrar = df_historial_conciliaciones.copy()
+                        df_hist_mostrar['tipo'] = df_hist_mostrar['tipo'].apply(lambda t: "💸 Pago a conductor" if t == "pago" else "💰 Cobro a conductor")
+                        df_hist_mostrar['monto'] = df_hist_mostrar['monto'].apply(lambda x: f"${formatear_numero(x)}")
+                        for _, hist in df_hist_mostrar.iterrows():
+                            col_h1, col_h2 = st.columns([5, 1])
+                            with col_h1:
+                                obs_txt = f" — {hist['observaciones']}" if hist['observaciones'] else ""
+                                st.caption(f"{hist['fecha']} · {hist['tipo']} · {hist['monto']}{obs_txt}")
+                            with col_h2:
+                                if st.button("🗑️", key=f"eliminar_conciliacion_{hist['id']}"):
+                                    db.eliminar_conciliacion_saldo(hist['id'])
+                                    st.rerun()
+
+        # ---------------- 3. Liquidaciones de Conductores (totales de comisión) ----------------
+        st.divider()
+        st.subheader("📋 Liquidaciones de Conductores")
+        st.caption("Total de comisiones a pagar por conductor (calculado en vivo a partir de todos sus viajes registrados) y el total general de todos los conductores.")
+
+        df_comisiones = db.obtener_comisiones_por_conductor()
+
+        if df_comisiones.empty:
+            st.info("No hay viajes registrados todavía para calcular comisiones.")
+        else:
+            total_general_comisiones = float(df_comisiones['total_comision'].sum())
+            st.info(f"💰 **TOTAL A PAGAR (Comisiones) — TODOS los conductores:** ${formatear_numero(total_general_comisiones)}")
+
+            for _, fila in df_comisiones.iterrows():
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.write(f"**{fila['conductor']}**")
+                    st.caption(f"🚛 {int(fila['cantidad_viajes'])} viajes")
+                with col2:
+                    st.write(f"${formatear_numero(fila['total_comision'])}")
+                st.divider()
 
 if __name__ == "__main__":
     main()
