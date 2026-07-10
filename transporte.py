@@ -51,6 +51,15 @@ CAMBIOS EN ESTA VERSIÓN (v4.9 - LIMPIEZA):
   2. 💰 Saldo con Conductores (Anticipo vs. Legalización) — con la opción
      de registrar si "ya me pagó" o "ya le pagué" (conciliación).
   3. 📋 Comisión a Pagar por Conductor
+
+CAMBIOS EN ESTA VERSIÓN (v4.10 - COMISIÓN DE CONDUCTOR MANUAL):
+- NUEVO: en la pestaña "4. Cálculo de Viaje" se agregó la opción de
+  digitar manualmente la Comisión del Conductor para un viaje puntual.
+  Por defecto se sigue usando el valor predeterminado calculado según el
+  tipo de ruta y el número de viajes; si el usuario diligencia un valor,
+  ese valor manual reemplaza al calculado SOLO para ese viaje.
+- NUEVO: la misma opción de comisión manual está disponible también al
+  editar un viaje ya guardado, en la pestaña "6. Trazabilidad".
 """
 
 import streamlit as st
@@ -1350,7 +1359,8 @@ class CalculadoraCostos:
                  cargue_descargue: float, otros: float, valor_flete: float,
                  anticipo: float, hubo_anticipo_empresa: bool, datos: DatosColombia,
                  peso: float = 0.0, cliente: str = "",
-                 distancia_km_override: float = None, consumo_km_galon_override: float = None):
+                 distancia_km_override: float = None, consumo_km_galon_override: float = None,
+                 comision_conductor_override: float = None):
         self.tractomula = tractomula
         self.conductor = conductor
         self.ruta = ruta
@@ -1379,6 +1389,10 @@ class CalculadoraCostos:
         # Consumo km/galón: por defecto el de la tractomula según tipo de ruta, pero editable
         # puntualmente cuando ese viaje específico tuvo un rendimiento distinto.
         self.consumo_km_galon_override = consumo_km_galon_override
+        # Comisión del conductor: por defecto se calcula según el tipo de ruta y el número de
+        # viajes (ver calcular_comision_conductor), pero se puede fijar manualmente para un
+        # viaje puntual si el usuario diligencia un valor.
+        self.comision_conductor_override = comision_conductor_override
 
     def aplica_formula_agofer(self) -> bool:
         return self.ruta.es_urbana and not self.es_frontera and es_cliente_agofer(self.cliente)
@@ -1402,6 +1416,25 @@ class CalculadoraCostos:
         return self.datos.NOMINA_CONDUCTOR_DIA * self.dias_viaje
 
     def calcular_comision_conductor(self) -> float:
+        # Si el usuario fijó manualmente la comisión para este viaje, esa tiene prioridad
+        # sobre el cálculo automático según tipo de ruta / número de viajes.
+        if self.comision_conductor_override is not None and self.comision_conductor_override > 0:
+            return self.comision_conductor_override
+        if self.ruta.es_aguachica:
+            return self.datos.COMISION_AGUACHICA
+        elif self.ruta.es_riohacha:
+            return self.datos.COMISION_RIOACHA
+        elif self.ruta.es_regional:
+            return self.datos.COMISION_REGIONAL
+        elif self.es_frontera:
+            return self.datos.COMISION_FRONTERA
+        else:
+            return self.datos.COMISION_URBANO_DIA * self.numero_viajes
+
+    def calcular_comision_conductor_predeterminada(self) -> float:
+        """Devuelve el valor de comisión que se calcularía automáticamente según el tipo de
+        ruta y el número de viajes, IGNORANDO cualquier valor manual. Se usa solo para
+        mostrarle al usuario cuál sería el valor por defecto antes de decidir si lo cambia."""
         if self.ruta.es_aguachica:
             return self.datos.COMISION_AGUACHICA
         elif self.ruta.es_riohacha:
@@ -1965,6 +1998,8 @@ def main():
 - Riohacha: ${formatear_numero(datos.COMISION_RIOACHA)}
 - Aguachica: ${formatear_numero(datos.COMISION_AGUACHICA)}
 - Frontera: ${formatear_numero(datos.COMISION_FRONTERA)}
+- Estos valores son el PREDETERMINADO; en cada viaje se puede fijar una
+  comisión manual distinta si es necesario (pestaña "4. Cálculo de Viaje").
 
 **Consumo (km/galón):**
 - Ahora es específico por tractomula Y por tipo de ruta (urbano, regional,
@@ -2674,6 +2709,34 @@ def main():
                 if consumo_override and consumo_override > 0:
                     st.caption(f"⛽ Se usará {consumo_override} km/galón en vez de los {_consumo_previo} km/galón por defecto.")
 
+                # ---------------- NUEVO v4.10: Comisión del conductor manual (opcional) ----------------
+                if ruta_obj.es_aguachica:
+                    comision_predeterminada = datos.COMISION_AGUACHICA
+                elif ruta_obj.es_riohacha:
+                    comision_predeterminada = datos.COMISION_RIOACHA
+                elif ruta_obj.es_regional:
+                    comision_predeterminada = datos.COMISION_REGIONAL
+                elif ruta_obj.es_frontera:
+                    comision_predeterminada = datos.COMISION_FRONTERA
+                else:
+                    comision_predeterminada = datos.COMISION_URBANO_DIA * numero_viajes
+
+                st.caption(f"💼 Comisión del conductor predeterminada para esta ruta: **${formatear_numero(comision_predeterminada)}**. "
+                           f"Se calcula automáticamente según el tipo de ruta y el N° de viajes.")
+
+                comision_override_texto = st.text_input(
+                    "💼 Comisión del conductor para este viaje (COP) — opcional",
+                    value="",
+                    placeholder=f"Por defecto: {formatear_numero(comision_predeterminada)}",
+                    help="Solo diligéncialo si este viaje en particular debe pagar una comisión distinta a la "
+                         "predeterminada para esta ruta (por ejemplo, un acuerdo puntual con el conductor). Si lo "
+                         "dejas vacío, se usa el valor calculado automáticamente.",
+                    key="sel_comision_override"
+                )
+                comision_override = limpiar_numero(comision_override_texto) if comision_override_texto else None
+                if comision_override and comision_override > 0:
+                    st.caption(f"💼 Se usará ${formatear_numero(comision_override)} en vez de los ${formatear_numero(comision_predeterminada)} por defecto.")
+
                 st.caption("💡 Los campos de gastos variables abajo ya vienen precargados con los valores por defecto de esta ruta (o con los calculados automáticamente para AGOFER). Puedes editarlos si el viaje tuvo un valor distinto.")
 
                 with st.form(key="form_calculo"):
@@ -2776,7 +2839,8 @@ def main():
                             valor_flete, anticipo, hubo_anticipo_empresa, datos,
                             peso=peso, cliente=cliente_viaje,
                             distancia_km_override=distancia_override,
-                            consumo_km_galon_override=consumo_override
+                            consumo_km_galon_override=consumo_override,
+                            comision_conductor_override=comision_override
                         )
                         costos_preview = calc_preview.calcular_costos_totales()
 
@@ -2792,8 +2856,8 @@ def main():
                         with col4:
                             st.metric("Punto Equilibrio (40% Flete)", f"${formatear_numero(costos_preview['punto_equilibrio'])}")
 
-                        st.info(f"🚛 **Comisión Conductor calculada:** ${formatear_numero(costos_preview['comision_conductor'])} "
-                                f"(según la ruta: fija, o $120.000 x {numero_viajes} viaje(s) si es urbana) · "
+                        _comision_manual_txt = " (MANUAL, editada por el usuario)" if comision_override and comision_override > 0 else " (automática según la ruta)"
+                        st.info(f"🚛 **Comisión Conductor calculada:** ${formatear_numero(costos_preview['comision_conductor'])}{_comision_manual_txt} · "
                                 f"**Distancia efectiva usada en combustible/llantas/aceite:** {formatear_numero(calc_preview.distancia_efectiva)} km · "
                                 f"**Consumo usado:** {calc_preview.obtener_consumo_km_galon()} km/galón ({_tipo_ruta_label})")
 
@@ -2817,7 +2881,8 @@ def main():
                                 valor_flete, anticipo, hubo_anticipo_empresa, datos,
                                 peso=peso, cliente=cliente_viaje,
                                 distancia_km_override=distancia_override,
-                                consumo_km_galon_override=consumo_override
+                                consumo_km_galon_override=consumo_override,
+                                comision_conductor_override=comision_override
                             )
                             st.session_state.calculadoras.append(calculadora)
 
@@ -3178,6 +3243,30 @@ def main():
                                     f"Cargue/Descargue sugerido ${formatear_numero(edit_cargue_sugerido)}"
                                 )
 
+                            # ---------------- NUEVO v4.10: Comisión del conductor manual (edición) ----------------
+                            if edit_ruta_obj_preview.es_aguachica:
+                                edit_comision_predeterminada = datos.COMISION_AGUACHICA
+                            elif edit_ruta_obj_preview.es_riohacha:
+                                edit_comision_predeterminada = datos.COMISION_RIOACHA
+                            elif edit_ruta_obj_preview.es_regional:
+                                edit_comision_predeterminada = datos.COMISION_REGIONAL
+                            elif edit_ruta_obj_preview.es_frontera:
+                                edit_comision_predeterminada = datos.COMISION_FRONTERA
+                            else:
+                                edit_comision_predeterminada = datos.COMISION_URBANO_DIA * edit_numero_viajes_preview
+
+                            st.caption(f"💼 Comisión predeterminada según esta ruta: **${formatear_numero(edit_comision_predeterminada)}**.")
+                            edit_comision_override_texto = st.text_input(
+                                "💼 Comisión del conductor para este viaje (COP) — opcional",
+                                value=formatear_numero(viaje[12]) if viaje[12] and float(viaje[12]) != edit_comision_predeterminada else "",
+                                placeholder=f"Por defecto: {formatear_numero(edit_comision_predeterminada)}",
+                                help="Solo diligéncialo si quieres fijar manualmente la comisión de este viaje. Si lo dejas vacío, se usa el cálculo automático según la ruta.",
+                                key="edit_comision_override"
+                            )
+                            edit_comision_override = limpiar_numero(edit_comision_override_texto) if edit_comision_override_texto else None
+                            if edit_comision_override and edit_comision_override > 0:
+                                st.caption(f"💼 Se usará ${formatear_numero(edit_comision_override)} en vez de los ${formatear_numero(edit_comision_predeterminada)} por defecto.")
+
                             with st.form(key="form_editar_viaje"):
                                 col1, col2 = st.columns(2)
                                 with col1:
@@ -3267,7 +3356,8 @@ def main():
                                         edit_valor_flete, edit_anticipo, edit_hubo_ant_empresa, datos,
                                         peso=edit_peso, cliente=edit_cliente,
                                         distancia_km_override=edit_distancia_override,
-                                        consumo_km_galon_override=edit_consumo_override
+                                        consumo_km_galon_override=edit_consumo_override,
+                                        comision_conductor_override=edit_comision_override
                                     )
                                     exito = db.actualizar_viaje(viaje_id_seleccionado, calculadora_editada, edit_fecha_viaje, edit_observaciones, edit_cliente)
                                     if exito:
