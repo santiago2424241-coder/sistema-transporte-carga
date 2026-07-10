@@ -38,6 +38,19 @@ CAMBIOS EN ESTA VERSIÓN (v4.8 - DÍAS SIN VIAJE):
   trazabilidad/historial.
 - NUEVO: en la pestaña "6. Trazabilidad" se agregó una sección para ver,
   filtrar por placa y eliminar estos registros de días sin viaje.
+
+CAMBIOS EN ESTA VERSIÓN (v4.9 - LIMPIEZA):
+- ELIMINADO: todo el módulo de control de combustible por sobreconsumo
+  (columna galones_reales, método obtener_viajes_con_consumo).
+- ELIMINADO: todo el módulo de Cuentas por Pagar/Cobrar (tabla
+  cuentas_por_pagar_cobrar y sus métodos guardar_cuenta, obtener_cuentas,
+  marcar_cuenta_pagada, eliminar_cuenta). Ninguno de los dos módulos tenía
+  una pestaña visible en la interfaz.
+- REORGANIZADO: la pestaña "8. Liquidaciones" ahora tiene el orden:
+  1. 🔍 Ver Viajes de un Conductor
+  2. 💰 Saldo con Conductores (Anticipo vs. Legalización) — con la opción
+     de registrar si "ya me pagó" o "ya le pagué" (conciliación).
+  3. 📋 Comisión a Pagar por Conductor
 """
 
 import streamlit as st
@@ -206,7 +219,6 @@ class DatabaseManager:
             """)
 
             cursor.execute("ALTER TABLE viajes_v4 ADD COLUMN IF NOT EXISTS cliente TEXT")
-            cursor.execute("ALTER TABLE viajes_v4 ADD COLUMN IF NOT EXISTS galones_reales REAL")
             cursor.execute("ALTER TABLE viajes_v4 ADD COLUMN IF NOT EXISTS numero_viajes INTEGER DEFAULT 1")
             cursor.execute("ALTER TABLE viajes_v4 ADD COLUMN IF NOT EXISTS peso REAL DEFAULT 0")
 
@@ -286,22 +298,6 @@ class DatabaseManager:
             ''')
             cursor.execute("ALTER TABLE liquidaciones_conductor ADD COLUMN IF NOT EXISTS placas TEXT")
 
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS cuentas_por_pagar_cobrar (
-                    id SERIAL PRIMARY KEY,
-                    tipo TEXT NOT NULL,
-                    concepto TEXT NOT NULL,
-                    tercero TEXT,
-                    monto REAL NOT NULL,
-                    fecha_vencimiento DATE NOT NULL,
-                    estado TEXT DEFAULT 'Pendiente',
-                    fecha_pago DATE,
-                    viaje_id INTEGER,
-                    observaciones TEXT,
-                    fecha_creacion TEXT
-                )
-            ''')
-
             # ---------------- NUEVO v4.8: Días sin viaje (solo trazabilidad) ----------------
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS dias_sin_viaje (
@@ -345,7 +341,7 @@ class DatabaseManager:
         try:
             cursor = conn.cursor()
             fecha_viaje_str = fecha_viaje.strftime('%Y-%m-%d') if hasattr(fecha_viaje, 'strftime') else fecha_viaje
-            limite = (datetime.now() - timedelta(hours=5) - timedelta(minutes=minutos)).strftime('%Y-%m-%d %H:%M:%S')
+            limite = (datetime.now() - timedelta(hours=5) - timedelta(minutos=minutos)).strftime('%Y-%m-%d %H:%M:%S')
             cursor.execute("""
                 SELECT id, fecha_creacion FROM viajes_v4
                 WHERE placa = %s AND conductor = %s AND fecha_viaje = %s
@@ -522,14 +518,13 @@ class DatabaseManager:
         finally:
             self.release_connection(conn)
 
-    def actualizar_viaje(self, viaje_id, calculadora, fecha_viaje, observaciones="", cliente="", galones_reales=None):
+    def actualizar_viaje(self, viaje_id, calculadora, fecha_viaje, observaciones="", cliente=""):
         conn = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
             costos = calculadora.calcular_costos_totales()
             fecha_viaje_str = fecha_viaje.strftime('%Y-%m-%d') if fecha_viaje else None
-            galones_reales_val = float(galones_reales) if galones_reales else None
 
             cursor.execute('''
                 UPDATE viajes_v4 SET
@@ -544,7 +539,7 @@ class DatabaseManager:
                     utilidad = %s, rentabilidad = %s, anticipo = %s, saldo = %s,
                     hubo_anticipo_empresa = %s, ant_empresa = %s, saldo_empresa = %s,
                     observaciones = %s, urea_acpm = %s, transporte = %s, propina_comision = %s,
-                    fecha_viaje = %s, cliente = %s, galones_reales = %s, numero_viajes = %s,
+                    fecha_viaje = %s, cliente = %s, numero_viajes = %s,
                     peso = %s
                 WHERE id = %s
             ''', (
@@ -563,7 +558,7 @@ class DatabaseManager:
                 float(calculadora.anticipo), costos['saldo'],
                 1 if calculadora.hubo_anticipo_empresa else 0, costos['ant_empresa'], costos['saldo_empresa'],
                 str(observaciones), float(calculadora.urea_acpm), float(calculadora.transporte),
-                float(calculadora.propina_comision), fecha_viaje_str, str(cliente), galones_reales_val,
+                float(calculadora.propina_comision), fecha_viaje_str, str(cliente),
                 int(calculadora.numero_viajes), float(calculadora.peso), viaje_id
             ))
             conn.commit()
@@ -574,31 +569,6 @@ class DatabaseManager:
         finally:
             if conn is not None:
                 self.release_connection(conn)
-
-    def obtener_viajes_con_consumo(self, placa=None):
-        conn = self.get_connection()
-        try:
-            query = """
-                SELECT id, fecha_viaje, placa, conductor, origen, destino, distancia_km,
-                       galones_necesarios, galones_reales, combustible
-                FROM viajes_v4
-                WHERE galones_reales IS NOT NULL AND galones_reales > 0
-            """
-            params = []
-            if placa:
-                query += " AND placa = %s"
-                params.append(placa)
-            query += " ORDER BY fecha_viaje DESC"
-            df = pd.read_sql_query(query, conn, params=params)
-        finally:
-            self.release_connection(conn)
-
-        if not df.empty:
-            df['diferencia_galones'] = df['galones_reales'] - df['galones_necesarios']
-            df['porcentaje_sobreconsumo'] = (
-                df['diferencia_galones'] / df['galones_necesarios'] * 100
-            ).where(df['galones_necesarios'] != 0, 0)
-        return df
 
     def obtener_estadisticas(self):
         conn = self.get_connection()
@@ -1083,63 +1053,6 @@ class DatabaseManager:
         try:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM liquidaciones_conductor WHERE id = %s", (liquidacion_id,))
-            conn.commit()
-        finally:
-            self.release_connection(conn)
-
-    # ---------------- Métodos para Cuentas por Pagar/Cobrar ----------------
-    def guardar_cuenta(self, tipo, concepto, tercero, monto, fecha_vencimiento, observaciones="", viaje_id=None):
-        conn = self.get_connection()
-        try:
-            cursor = conn.cursor()
-            hora_colombia = datetime.now() - timedelta(hours=5)
-            fecha_creacion = hora_colombia.strftime('%Y-%m-%d %H:%M:%S')
-            cursor.execute('''
-                INSERT INTO cuentas_por_pagar_cobrar (
-                    tipo, concepto, tercero, monto, fecha_vencimiento, estado, observaciones, viaje_id, fecha_creacion
-                ) VALUES (%s, %s, %s, %s, %s, 'Pendiente', %s, %s, %s)
-                RETURNING id
-            ''', (tipo, concepto, tercero, monto, fecha_vencimiento, observaciones, viaje_id, fecha_creacion))
-            result = cursor.fetchone()
-            cuenta_id = result[0] if result else None
-            conn.commit()
-            return cuenta_id
-        finally:
-            self.release_connection(conn)
-
-    def obtener_cuentas(self, tipo=None, estado=None):
-        conn = self.get_connection()
-        try:
-            query = "SELECT * FROM cuentas_por_pagar_cobrar WHERE 1=1"
-            params = []
-            if tipo:
-                query += " AND tipo = %s"
-                params.append(tipo)
-            if estado:
-                query += " AND estado = %s"
-                params.append(estado)
-            query += " ORDER BY fecha_vencimiento ASC"
-            df = pd.read_sql_query(query, conn, params=params)
-            return df
-        finally:
-            self.release_connection(conn)
-
-    def marcar_cuenta_pagada(self, cuenta_id):
-        conn = self.get_connection()
-        try:
-            cursor = conn.cursor()
-            hoy = (datetime.now() - timedelta(hours=5)).strftime('%Y-%m-%d')
-            cursor.execute("UPDATE cuentas_por_pagar_cobrar SET estado = 'Pagado', fecha_pago = %s WHERE id = %s",
-                           (hoy, cuenta_id))
-            conn.commit()
-        finally:
-            self.release_connection(conn)
-
-    def eliminar_cuenta(self, cuenta_id):
-        conn = self.get_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM cuentas_por_pagar_cobrar WHERE id = %s", (cuenta_id,))
             conn.commit()
         finally:
             self.release_connection(conn)
@@ -3520,7 +3433,7 @@ def main():
         st.header("💵 Liquidaciones de Conductores")
 
         # ---------------- 1. Ver Viajes de un Conductor ----------------
-        st.subheader("🔍 Ver Viajes de un Conductor")
+        st.subheader("1. 🔍 Ver Viajes de un Conductor")
         st.caption("Filtra por conductor (y opcionalmente por fecha) para ver uno por uno los viajes que hizo, con su comisión.")
 
         conductores_nombres_liq = [c.nombre for c in st.session_state.conductores] if st.session_state.conductores else []
@@ -3563,11 +3476,11 @@ def main():
 
         # ---------------- 2. Saldo con Conductores (Anticipo vs. Legalización) ----------------
         st.divider()
-        st.subheader("💰 Saldo con Conductores (Anticipo vs. Legalización)")
+        st.subheader("2. 💰 Saldo con Conductores (Anticipo vs. Legalización)")
         st.caption("Acumulado histórico de todos los viajes: si le diste más anticipo del que gastó, el conductor "
                    "**te debe a ti**. Si gastó más de lo que le diste, **tú le debes a él**. Despliega cada "
                    "conductor para ver la fecha y el viaje puntual que generó cada diferencia, y para registrar "
-                   "cuando ya le pagaste lo que le debías o ya le cobraste lo que te debía.")
+                   "si **ya te pagó** lo que te debía o si **ya le pagaste** lo que le debías.")
 
         df_saldo_conductores = db.obtener_saldo_por_conductor()
         df_ajustes_saldo = db.obtener_ajuste_neto_por_conductor()
@@ -3649,13 +3562,13 @@ def main():
                         df_detalle_mostrar.columns = ['Fecha', 'Placa', 'Ruta', 'Anticipo', 'Legalización', 'Saldo', 'Motivo']
                         st.dataframe(df_detalle_mostrar, use_container_width=True, hide_index=True)
 
-                    st.markdown("**✅ Registrar pago o cobro:**")
+                    st.markdown("**✅ ¿Ya me pagó o ya le pagué?**")
                     with st.form(key=f"form_conciliacion_{fila['conductor']}"):
                         col1, col2 = st.columns(2)
                         with col1:
                             tipo_conciliacion = st.selectbox(
                                 "¿Qué pasó?",
-                                ["💸 Le pagué lo que le debía", "💰 Le cobré lo que me debía"],
+                                ["💰 Ya me pagó (le cobré lo que me debía)", "💸 Ya le pagué (le pagué lo que le debía)"],
                                 key=f"tipo_conciliacion_{fila['conductor']}"
                             )
                         with col2:
@@ -3674,7 +3587,7 @@ def main():
                             if monto_conciliacion <= 0:
                                 st.error("⚠️ Ingresa un monto mayor a cero.")
                             else:
-                                tipo_bd = "pago" if tipo_conciliacion.startswith("💸") else "cobro"
+                                tipo_bd = "cobro" if tipo_conciliacion.startswith("💰") else "pago"
                                 db.guardar_conciliacion_saldo(fila['conductor'], fecha_conciliacion, tipo_bd, monto_conciliacion, obs_conciliacion)
                                 st.success("✅ Registrado. El saldo pendiente se actualizó.")
                                 st.rerun()
@@ -3683,7 +3596,7 @@ def main():
                     if not df_historial_conciliaciones.empty:
                         st.markdown("**🧾 Historial de pagos/cobros registrados:**")
                         df_hist_mostrar = df_historial_conciliaciones.copy()
-                        df_hist_mostrar['tipo'] = df_hist_mostrar['tipo'].apply(lambda t: "💸 Pago a conductor" if t == "pago" else "💰 Cobro a conductor")
+                        df_hist_mostrar['tipo'] = df_hist_mostrar['tipo'].apply(lambda t: "💸 Ya le pagué" if t == "pago" else "💰 Ya me pagó")
                         df_hist_mostrar['monto'] = df_hist_mostrar['monto'].apply(lambda x: f"${formatear_numero(x)}")
                         for _, hist in df_hist_mostrar.iterrows():
                             col_h1, col_h2 = st.columns([5, 1])
@@ -3695,9 +3608,9 @@ def main():
                                     db.eliminar_conciliacion_saldo(hist['id'])
                                     st.rerun()
 
-        # ---------------- 3. Liquidaciones de Conductores (totales de comisión) ----------------
+        # ---------------- 3. Comisión a Pagar por Conductor ----------------
         st.divider()
-        st.subheader("📋 Liquidaciones de Conductores")
+        st.subheader("3. 📋 Comisión a Pagar por Conductor")
         st.caption("Total de comisiones a pagar por conductor (calculado en vivo a partir de todos sus viajes registrados) y el total general de todos los conductores.")
 
         df_comisiones = db.obtener_comisiones_por_conductor()
