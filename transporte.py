@@ -1,6 +1,6 @@
 """
 Sistema de Programación de Rutas y Cálculo de Costos para Tractomulas
-Versión 4.11 - Conectado a Supabase (PostgreSQL) - ACTUALIZADO
+Versión 4.12 - Conectado a Supabase (PostgreSQL) - ACTUALIZADO
 Contexto: Colombia
 Autor: Sistema de Gestión de Transporte de Carga
 
