@@ -1,6 +1,6 @@
 """
 Sistema de Programación de Rutas y Cálculo de Costos para Tractomulas
-Versión 4.8 - Conectado a Supabase (PostgreSQL) - ACTUALIZADO
+Versión 4.11 - Conectado a Supabase (PostgreSQL) - ACTUALIZADO
 Contexto: Colombia
 Autor: Sistema de Gestión de Transporte de Carga
 
@@ -60,6 +60,17 @@ CAMBIOS EN ESTA VERSIÓN (v4.10 - COMISIÓN DE CONDUCTOR MANUAL):
   ese valor manual reemplaza al calculado SOLO para ese viaje.
 - NUEVO: la misma opción de comisión manual está disponible también al
   editar un viaje ya guardado, en la pestaña "6. Trazabilidad".
+
+CAMBIOS EN ESTA VERSIÓN (v4.11 - PARQUEO MANUAL Y CRUCE FRONTERA SELECCIONABLE):
+- CAMBIADO: el checkbox "¿Hubo parqueo?" (que calculaba automáticamente
+  $15.000 x días de viaje) fue reemplazado por un campo manual "Parqueo
+  (COP)" donde se digita directamente el valor real de parqueo de ese
+  viaje puntual. Aplica tanto al crear un viaje nuevo como al editar uno
+  ya guardado (pestaña "6. Trazabilidad").
+- NUEVO: cuando se marca "¿Es viaje a frontera?" ahora aparece un selector
+  para elegir el valor del Cruce de Frontera de ese viaje puntual, entre
+  $560.000 (valor por defecto) o $350.000. Aplica tanto al crear un viaje
+  nuevo como al editarlo.
 """
 
 import streamlit as st
@@ -387,7 +398,7 @@ class DatabaseManager:
                 float(calculadora.distancia_efectiva),
                 int(calculadora.dias_viaje),
                 1 if calculadora.es_frontera else 0,
-                1 if calculadora.hubo_parqueo else 0,
+                1 if calculadora.parqueo and calculadora.parqueo > 0 else 0,
                 costos['nomina_admin'],
                 costos['nomina_conductor'],
                 costos['comision_conductor'],
@@ -555,7 +566,8 @@ class DatabaseManager:
                 str(calculadora.tractomula.placa), str(calculadora.conductor.nombre),
                 str(calculadora.ruta.origen), str(calculadora.ruta.destino),
                 float(calculadora.distancia_efectiva), int(calculadora.dias_viaje),
-                1 if calculadora.es_frontera else 0, 1 if calculadora.hubo_parqueo else 0,
+                1 if calculadora.es_frontera else 0,
+                1 if calculadora.parqueo and calculadora.parqueo > 0 else 0,
                 costos['nomina_admin'], costos['nomina_conductor'], costos['comision_conductor'],
                 costos['mantenimiento'], costos['seguros'], costos['tecnomecanica'], costos['llantas'],
                 costos['aceite'], costos['combustible'], costos['galones_necesarios'],
@@ -1319,8 +1331,10 @@ class DatosColombia:
     LLANTAS_KM = 80000
     ACEITE_COSTO = 2500000
     ACEITE_KM = 15000
+    # Valor por defecto del Cruce de Frontera. Ahora es seleccionable por viaje entre
+    # este valor y CRUCE_FRONTERA_ALT (ver pestaña "4. Cálculo de Viaje").
     CRUCE_FRONTERA = 560000
-    PARQUEO_DIA = 15000
+    CRUCE_FRONTERA_ALT = 350000
     MARGEN_ANT_EMPRESA = 0.90
     PUNTO_EQUILIBRIO_PORCENTAJE = 0.40
 
@@ -1353,21 +1367,24 @@ class CalculadoraCostos:
     """Calcula todos los costos del viaje con fórmulas ACTUALIZADAS v4.3"""
 
     def __init__(self, tractomula: Tractomula, conductor: Conductor, ruta: Ruta,
-                 dias_viaje: int, numero_viajes: int, es_frontera: bool, hubo_parqueo: bool,
+                 dias_viaje: int, numero_viajes: int, es_frontera: bool, parqueo: float,
                  flypass: float, peajes: float, urea_acpm: float, hotel: float,
                  comida: float, transporte: float, propina_comision: float,
                  cargue_descargue: float, otros: float, valor_flete: float,
                  anticipo: float, hubo_anticipo_empresa: bool, datos: DatosColombia,
                  peso: float = 0.0, cliente: str = "",
                  distancia_km_override: float = None, consumo_km_galon_override: float = None,
-                 comision_conductor_override: float = None):
+                 comision_conductor_override: float = None,
+                 cruce_frontera_override: float = None):
         self.tractomula = tractomula
         self.conductor = conductor
         self.ruta = ruta
         self.dias_viaje = dias_viaje
         self.numero_viajes = numero_viajes
         self.es_frontera = es_frontera
-        self.hubo_parqueo = hubo_parqueo
+        # Parqueo: valor digitado manualmente por el usuario para este viaje puntual
+        # (ya NO se calcula automáticamente como $/día).
+        self.parqueo = parqueo if parqueo else 0.0
         self.flypass = flypass
         self.peajes = peajes
         self.urea_acpm = urea_acpm
@@ -1393,6 +1410,9 @@ class CalculadoraCostos:
         # viajes (ver calcular_comision_conductor), pero se puede fijar manualmente para un
         # viaje puntual si el usuario diligencia un valor.
         self.comision_conductor_override = comision_conductor_override
+        # Cruce de Frontera: por defecto se usa datos.CRUCE_FRONTERA ($560.000), pero se puede
+        # elegir manualmente entre $560.000 y $350.000 (datos.CRUCE_FRONTERA_ALT) para este viaje.
+        self.cruce_frontera_override = cruce_frontera_override
 
     def aplica_formula_agofer(self) -> bool:
         return self.ruta.es_urbana and not self.es_frontera and es_cliente_agofer(self.cliente)
@@ -1497,10 +1517,17 @@ class CalculadoraCostos:
         return galones * self.datos.PRECIO_DIESEL
 
     def calcular_cruce_frontera(self) -> float:
-        return self.datos.CRUCE_FRONTERA if self.es_frontera else 0
+        if not self.es_frontera:
+            return 0
+        # Si el usuario eligió manualmente el valor del cruce de frontera para este viaje
+        # (560.000 o 350.000), ese valor tiene prioridad sobre el predeterminado.
+        if self.cruce_frontera_override is not None and self.cruce_frontera_override > 0:
+            return self.cruce_frontera_override
+        return self.datos.CRUCE_FRONTERA
 
     def calcular_parqueo(self) -> float:
-        return self.datos.PARQUEO_DIA * self.dias_viaje if self.hubo_parqueo else 0
+        # Valor de parqueo digitado manualmente por el usuario para este viaje puntual.
+        return self.parqueo if self.parqueo else 0.0
 
     def calcular_legalizacion(self) -> float:
         return (self.peajes + self.urea_acpm + self.calcular_cruce_frontera() + self.hotel +
@@ -1599,7 +1626,7 @@ Es frontera: {'Sí' if calculadora.es_frontera else 'No'}
 Es regional: {'Sí' if calculadora.ruta.es_regional else 'No'}
 Es Aguachica: {'Sí' if calculadora.ruta.es_aguachica else 'No'}
 Es Riohacha: {'Sí' if calculadora.ruta.es_riohacha else 'No'}
-Hubo parqueo: {'Sí' if calculadora.hubo_parqueo else 'No'}
+Parqueo (manual): ${formatear_numero(calculadora.parqueo)} COP
 
 VEHÍCULO
 {'-'*70}
@@ -2007,6 +2034,14 @@ def main():
   También se puede ajustar puntualmente para un viaje específico en la
   pestaña "4. Cálculo de Viaje".
 
+**Parqueo:**
+- Valor 100% MANUAL: se digita directamente en cada viaje el valor real de
+  parqueo (ya no se calcula automático por día).
+
+**Cruce de Frontera:**
+- Seleccionable por viaje entre ${formatear_numero(datos.CRUCE_FRONTERA)} (por defecto)
+  y ${formatear_numero(datos.CRUCE_FRONTERA_ALT)}, en la pestaña "4. Cálculo de Viaje".
+
 **Automatización Cliente AGOFER (rutas urbanas):**
 - Flete = Peso (kg) x ${formatear_numero(datos.AGOFER_VALOR_POR_KG)} x N° de Viajes
 - Cargue/Descargue = ${formatear_numero(datos.AGOFER_CARGUE_DESCARGUE)} x N° de Viajes
@@ -2015,8 +2050,6 @@ def main():
 **Otros:**
 - Tecnomecánica/año: ${formatear_numero(datos.TECNOMECANICA_ANUAL)}
 - Llantas: ${formatear_numero(datos.LLANTAS_COSTO)}
-- Cruce frontera: ${formatear_numero(datos.CRUCE_FRONTERA)}
-- Parqueo/día: ${formatear_numero(datos.PARQUEO_DIA)}
 - Punto de equilibrio: Valor Flete x {int(datos.PUNTO_EQUILIBRIO_PORCENTAJE*100)}%
         """)
 
@@ -2747,7 +2780,17 @@ def main():
                     with col1:
                         es_frontera = st.checkbox("¿Es viaje a frontera?", value=ruta_obj.es_frontera,
                                                     help="Afecta Comisión Conductor y Cruce Frontera")
-                        hubo_parqueo = st.checkbox("¿Hubo parqueo?", value=False)
+                        # ---------------- NUEVO v4.11: Valor del Cruce de Frontera seleccionable ----------------
+                        if es_frontera:
+                            cruce_frontera_valor = st.selectbox(
+                                "💵 Valor Cruce Frontera (COP)",
+                                [datos.CRUCE_FRONTERA, datos.CRUCE_FRONTERA_ALT],
+                                format_func=lambda x: f"${formatear_numero(x)}",
+                                key="sel_cruce_frontera_valor",
+                                help="Elige el valor del cruce de frontera para este viaje puntual."
+                            )
+                        else:
+                            cruce_frontera_valor = datos.CRUCE_FRONTERA
                         hubo_anticipo_empresa = st.checkbox("¿Hubo anticipo empresa?", value=False,
                                                            help="Activa ANTICIPO EMPRESA = VALOR FLETE × 0.90")
 
@@ -2789,6 +2832,15 @@ def main():
                         propina_comision = limpiar_numero(propina_texto)
                         if propina_comision > 0:
                             st.caption(f"💵 {formatear_numero(propina_comision)}")
+
+                        # ---------------- NUEVO v4.11: Parqueo manual ----------------
+                        parqueo_texto = st.text_input(
+                            "🅿️ Parqueo (COP)", value="", placeholder="0",
+                            help="Digita el valor real de parqueo de este viaje puntual."
+                        )
+                        parqueo = limpiar_numero(parqueo_texto)
+                        if parqueo > 0:
+                            st.caption(f"💵 {formatear_numero(parqueo)}")
                     with col2:
                         valor_default_cargue = cargue_sugerido_agofer if aplica_agofer else ruta_obj.default_cargue_descargue
                         cargue_texto = st.text_input(
@@ -2833,14 +2885,15 @@ def main():
                     if valor_flete > 0:
                         calc_preview = CalculadoraCostos(
                             tractomula_obj, conductor_obj, ruta_obj,
-                            dias_viaje, numero_viajes, es_frontera, hubo_parqueo,
+                            dias_viaje, numero_viajes, es_frontera, parqueo,
                             flypass, peajes, urea_acpm, hotel, comida, transporte,
                             propina_comision, cargue_descargue, otros,
                             valor_flete, anticipo, hubo_anticipo_empresa, datos,
                             peso=peso, cliente=cliente_viaje,
                             distancia_km_override=distancia_override,
                             consumo_km_galon_override=consumo_override,
-                            comision_conductor_override=comision_override
+                            comision_conductor_override=comision_override,
+                            cruce_frontera_override=cruce_frontera_valor
                         )
                         costos_preview = calc_preview.calcular_costos_totales()
 
@@ -2860,6 +2913,8 @@ def main():
                         st.info(f"🚛 **Comisión Conductor calculada:** ${formatear_numero(costos_preview['comision_conductor'])}{_comision_manual_txt} · "
                                 f"**Distancia efectiva usada en combustible/llantas/aceite:** {formatear_numero(calc_preview.distancia_efectiva)} km · "
                                 f"**Consumo usado:** {calc_preview.obtener_consumo_km_galon()} km/galón ({_tipo_ruta_label})")
+                        if es_frontera:
+                            st.caption(f"🌐 Cruce de Frontera usado en este viaje: ${formatear_numero(costos_preview['cruce_frontera'])}")
 
                     observaciones = st.text_area("Observaciones (opcional)", placeholder="Notas sobre este viaje...")
 
@@ -2875,14 +2930,15 @@ def main():
                         else:
                             calculadora = CalculadoraCostos(
                                 tractomula_obj, conductor_obj, ruta_obj,
-                                dias_viaje, numero_viajes, es_frontera, hubo_parqueo,
+                                dias_viaje, numero_viajes, es_frontera, parqueo,
                                 flypass, peajes, urea_acpm, hotel, comida, transporte,
                                 propina_comision, cargue_descargue, otros,
                                 valor_flete, anticipo, hubo_anticipo_empresa, datos,
                                 peso=peso, cliente=cliente_viaje,
                                 distancia_km_override=distancia_override,
                                 consumo_km_galon_override=consumo_override,
-                                comision_conductor_override=comision_override
+                                comision_conductor_override=comision_override,
+                                cruce_frontera_override=cruce_frontera_valor
                             )
                             st.session_state.calculadoras.append(calculadora)
 
@@ -3103,7 +3159,7 @@ def main():
                         except IndexError:
                             pass
                         st.write(f"**Es Frontera:** {'Sí' if viaje[8] else 'No'}")
-                        st.write(f"**Hubo Parqueo:** {'Sí' if viaje[9] else 'No'}")
+                        st.write(f"**Parqueo:** ${formatear_numero(viaje[25])}")
 
                     with col2:
                         st.markdown("### 💰 Resultados Financieros")
@@ -3280,13 +3336,31 @@ def main():
                                     )
                                 with col2:
                                     edit_es_frontera = st.checkbox("¿Es viaje a frontera?", value=bool(viaje[8]), key="edit_frontera")
-                                    edit_hubo_parqueo = st.checkbox("¿Hubo parqueo?", value=bool(viaje[9]), key="edit_parqueo")
+                                    # ---------------- NUEVO v4.11: Valor del Cruce de Frontera seleccionable (edición) ----------------
+                                    if edit_es_frontera:
+                                        _cruce_actual = int(viaje[22]) if viaje[22] else int(datos.CRUCE_FRONTERA)
+                                        _opciones_cruce = [int(datos.CRUCE_FRONTERA), int(datos.CRUCE_FRONTERA_ALT)]
+                                        _idx_cruce = _opciones_cruce.index(_cruce_actual) if _cruce_actual in _opciones_cruce else 0
+                                        edit_cruce_frontera_valor = st.selectbox(
+                                            "💵 Valor Cruce Frontera (COP)", _opciones_cruce,
+                                            index=_idx_cruce, format_func=lambda x: f"${formatear_numero(x)}",
+                                            key="edit_cruce_frontera_valor"
+                                        )
+                                    else:
+                                        edit_cruce_frontera_valor = datos.CRUCE_FRONTERA
                                     edit_hubo_ant_empresa = st.checkbox("¿Hubo anticipo empresa?", value=bool(viaje[36]), key="edit_ant_empresa")
                                     edit_consumo_override_texto = st.text_input(
                                         "⛽ Consumo real de este viaje (km/galón) — opcional",
                                         value="", placeholder="Dejar vacío para usar el de la tractomula",
                                         key="edit_consumo_override"
                                     )
+                                    # ---------------- NUEVO v4.11: Parqueo manual (edición) ----------------
+                                    edit_parqueo_texto = st.text_input(
+                                        "🅿️ Parqueo (COP)",
+                                        value=formatear_numero(viaje[25]) if viaje[25] else "",
+                                        key="edit_parqueo"
+                                    )
+                                    edit_parqueo = limpiar_numero(edit_parqueo_texto)
 
                                 col1, col2, col3 = st.columns(3)
                                 with col1:
@@ -3350,14 +3424,15 @@ def main():
 
                                     calculadora_editada = CalculadoraCostos(
                                         edit_tractomula_obj, edit_conductor_obj, edit_ruta_obj,
-                                        edit_dias, edit_numero_viajes, edit_es_frontera, edit_hubo_parqueo,
+                                        edit_dias, edit_numero_viajes, edit_es_frontera, edit_parqueo,
                                         edit_flypass, edit_peajes, edit_urea, edit_hotel, edit_comida,
                                         edit_transporte, edit_propina, edit_cargue, edit_otros,
                                         edit_valor_flete, edit_anticipo, edit_hubo_ant_empresa, datos,
                                         peso=edit_peso, cliente=edit_cliente,
                                         distancia_km_override=edit_distancia_override,
                                         consumo_km_galon_override=edit_consumo_override,
-                                        comision_conductor_override=edit_comision_override
+                                        comision_conductor_override=edit_comision_override,
+                                        cruce_frontera_override=edit_cruce_frontera_valor
                                     )
                                     exito = db.actualizar_viaje(viaje_id_seleccionado, calculadora_editada, edit_fecha_viaje, edit_observaciones, edit_cliente)
                                     if exito:
