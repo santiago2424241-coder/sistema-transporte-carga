@@ -71,6 +71,18 @@ CAMBIOS EN ESTA VERSIÓN (v4.11 - PARQUEO MANUAL Y CRUCE FRONTERA SELECCIONABLE)
   para elegir el valor del Cruce de Frontera de ese viaje puntual, entre
   $560.000 (valor por defecto) o $350.000. Aplica tanto al crear un viaje
   nuevo como al editarlo.
+
+CAMBIOS EN ESTA VERSIÓN (v4.12 - CORRECCIÓN: CHECKBOX FRONTERA FUERA DEL FORM):
+- CORREGIDO: "¿Es viaje a frontera?" y el selector de Cruce de Frontera
+  (crear y editar viaje) estaban dentro de un st.form. Streamlit NO
+  re-ejecuta el script cuando cambias un widget dentro de un form (solo al
+  pulsar el botón de envío), así que marcar la casilla no hacía aparecer el
+  selector de $560.000 / $350.000 en pantalla, y el primer cálculo se hacía
+  siempre con el valor por defecto. Ahora ambos widgets se sacaron del form
+  (igual que ya se hacía con la distancia, el consumo y la comisión
+  manual), así aparecen y se pueden usar de inmediato al marcar la casilla,
+  antes de pulsar "Calcular"/"Guardar". El campo de Parqueo (COP) no tenía
+  este problema (no depende de otro widget) y sigue funcionando igual.
 """
 
 import streamlit as st
@@ -2770,6 +2782,38 @@ def main():
                 if comision_override and comision_override > 0:
                     st.caption(f"💼 Se usará ${formatear_numero(comision_override)} en vez de los ${formatear_numero(comision_predeterminada)} por defecto.")
 
+                # ---------------- NUEVO v4.12: ¿Es viaje a frontera? y Cruce de Frontera FUERA del form ----------------
+                # Se sacan del st.form (igual que distancia/consumo/comisión) porque Streamlit
+                # NO re-ejecuta el script al marcar un checkbox dentro de un form -- solo al
+                # pulsar el botón de envío. Si se dejan dentro, el selector de $560.000/$350.000
+                # no aparece en pantalla al marcar la casilla.
+                es_frontera = st.checkbox(
+                    "¿Es viaje a frontera?", value=ruta_obj.es_frontera,
+                    help="Afecta Comisión Conductor y Cruce Frontera",
+                    key="sel_es_frontera"
+                )
+                if es_frontera:
+                    cruce_frontera_valor = st.selectbox(
+                        "💵 Valor Cruce Frontera (COP)",
+                        [datos.CRUCE_FRONTERA, datos.CRUCE_FRONTERA_ALT],
+                        format_func=lambda x: f"${formatear_numero(x)}",
+                        key="sel_cruce_frontera_valor",
+                        help="Elige el valor del cruce de frontera para este viaje puntual."
+                    )
+                    st.caption(f"🌐 Se usará ${formatear_numero(cruce_frontera_valor)} como Cruce de Frontera para este viaje.")
+                else:
+                    cruce_frontera_valor = datos.CRUCE_FRONTERA
+
+                # ---------------- NUEVO v4.11: Parqueo manual (fuera del form, mismo criterio) ----------------
+                parqueo_texto = st.text_input(
+                    "🅿️ Parqueo (COP)", value="", placeholder="0",
+                    help="Digita el valor real de parqueo de este viaje puntual.",
+                    key="sel_parqueo"
+                )
+                parqueo = limpiar_numero(parqueo_texto)
+                if parqueo > 0:
+                    st.caption(f"💵 {formatear_numero(parqueo)}")
+
                 st.caption("💡 Los campos de gastos variables abajo ya vienen precargados con los valores por defecto de esta ruta (o con los calculados automáticamente para AGOFER). Puedes editarlos si el viaje tuvo un valor distinto.")
 
                 with st.form(key="form_calculo"):
@@ -2778,19 +2822,9 @@ def main():
 
                     col1, col2, col3 = st.columns(3)
                     with col1:
-                        es_frontera = st.checkbox("¿Es viaje a frontera?", value=ruta_obj.es_frontera,
-                                                    help="Afecta Comisión Conductor y Cruce Frontera")
-                        # ---------------- NUEVO v4.11: Valor del Cruce de Frontera seleccionable ----------------
+                        st.write(f"**¿Es viaje a frontera?** {'Sí' if es_frontera else 'No'}")
                         if es_frontera:
-                            cruce_frontera_valor = st.selectbox(
-                                "💵 Valor Cruce Frontera (COP)",
-                                [datos.CRUCE_FRONTERA, datos.CRUCE_FRONTERA_ALT],
-                                format_func=lambda x: f"${formatear_numero(x)}",
-                                key="sel_cruce_frontera_valor",
-                                help="Elige el valor del cruce de frontera para este viaje puntual."
-                            )
-                        else:
-                            cruce_frontera_valor = datos.CRUCE_FRONTERA
+                            st.write(f"**Cruce Frontera:** ${formatear_numero(cruce_frontera_valor)}")
                         hubo_anticipo_empresa = st.checkbox("¿Hubo anticipo empresa?", value=False,
                                                            help="Activa ANTICIPO EMPRESA = VALOR FLETE × 0.90")
 
@@ -2832,15 +2866,6 @@ def main():
                         propina_comision = limpiar_numero(propina_texto)
                         if propina_comision > 0:
                             st.caption(f"💵 {formatear_numero(propina_comision)}")
-
-                        # ---------------- NUEVO v4.11: Parqueo manual ----------------
-                        parqueo_texto = st.text_input(
-                            "🅿️ Parqueo (COP)", value="", placeholder="0",
-                            help="Digita el valor real de parqueo de este viaje puntual."
-                        )
-                        parqueo = limpiar_numero(parqueo_texto)
-                        if parqueo > 0:
-                            st.caption(f"💵 {formatear_numero(parqueo)}")
                     with col2:
                         valor_default_cargue = cargue_sugerido_agofer if aplica_agofer else ruta_obj.default_cargue_descargue
                         cargue_texto = st.text_input(
@@ -3323,6 +3348,34 @@ def main():
                             if edit_comision_override and edit_comision_override > 0:
                                 st.caption(f"💼 Se usará ${formatear_numero(edit_comision_override)} en vez de los ${formatear_numero(edit_comision_predeterminada)} por defecto.")
 
+                            # ---------------- NUEVO v4.12: ¿Es viaje a frontera? y Cruce de Frontera FUERA del form (edición) ----------------
+                            # Mismo motivo que en la creación: dentro de un st.form el checkbox no
+                            # dispara un rerun al marcarlo, así que el selector de $560.000/$350.000
+                            # no aparecía. Se sacan ambos widgets antes de abrir el form de edición.
+                            edit_es_frontera = st.checkbox(
+                                "¿Es viaje a frontera?", value=bool(viaje[8]), key="edit_frontera"
+                            )
+                            if edit_es_frontera:
+                                _cruce_actual = int(viaje[22]) if viaje[22] else int(datos.CRUCE_FRONTERA)
+                                _opciones_cruce = [int(datos.CRUCE_FRONTERA), int(datos.CRUCE_FRONTERA_ALT)]
+                                _idx_cruce = _opciones_cruce.index(_cruce_actual) if _cruce_actual in _opciones_cruce else 0
+                                edit_cruce_frontera_valor = st.selectbox(
+                                    "💵 Valor Cruce Frontera (COP)", _opciones_cruce,
+                                    index=_idx_cruce, format_func=lambda x: f"${formatear_numero(x)}",
+                                    key="edit_cruce_frontera_valor"
+                                )
+                                st.caption(f"🌐 Se usará ${formatear_numero(edit_cruce_frontera_valor)} como Cruce de Frontera para este viaje.")
+                            else:
+                                edit_cruce_frontera_valor = datos.CRUCE_FRONTERA
+
+                            # ---------------- NUEVO v4.11: Parqueo manual (edición) — también fuera del form ----------------
+                            edit_parqueo_texto = st.text_input(
+                                "🅿️ Parqueo (COP)",
+                                value=formatear_numero(viaje[25]) if viaje[25] else "",
+                                key="edit_parqueo"
+                            )
+                            edit_parqueo = limpiar_numero(edit_parqueo_texto)
+
                             with st.form(key="form_editar_viaje"):
                                 col1, col2 = st.columns(2)
                                 with col1:
@@ -3335,32 +3388,15 @@ def main():
                                         key="edit_fecha_viaje"
                                     )
                                 with col2:
-                                    edit_es_frontera = st.checkbox("¿Es viaje a frontera?", value=bool(viaje[8]), key="edit_frontera")
-                                    # ---------------- NUEVO v4.11: Valor del Cruce de Frontera seleccionable (edición) ----------------
+                                    st.write(f"**¿Es viaje a frontera?** {'Sí' if edit_es_frontera else 'No'}")
                                     if edit_es_frontera:
-                                        _cruce_actual = int(viaje[22]) if viaje[22] else int(datos.CRUCE_FRONTERA)
-                                        _opciones_cruce = [int(datos.CRUCE_FRONTERA), int(datos.CRUCE_FRONTERA_ALT)]
-                                        _idx_cruce = _opciones_cruce.index(_cruce_actual) if _cruce_actual in _opciones_cruce else 0
-                                        edit_cruce_frontera_valor = st.selectbox(
-                                            "💵 Valor Cruce Frontera (COP)", _opciones_cruce,
-                                            index=_idx_cruce, format_func=lambda x: f"${formatear_numero(x)}",
-                                            key="edit_cruce_frontera_valor"
-                                        )
-                                    else:
-                                        edit_cruce_frontera_valor = datos.CRUCE_FRONTERA
+                                        st.write(f"**Cruce Frontera:** ${formatear_numero(edit_cruce_frontera_valor)}")
                                     edit_hubo_ant_empresa = st.checkbox("¿Hubo anticipo empresa?", value=bool(viaje[36]), key="edit_ant_empresa")
                                     edit_consumo_override_texto = st.text_input(
                                         "⛽ Consumo real de este viaje (km/galón) — opcional",
                                         value="", placeholder="Dejar vacío para usar el de la tractomula",
                                         key="edit_consumo_override"
                                     )
-                                    # ---------------- NUEVO v4.11: Parqueo manual (edición) ----------------
-                                    edit_parqueo_texto = st.text_input(
-                                        "🅿️ Parqueo (COP)",
-                                        value=formatear_numero(viaje[25]) if viaje[25] else "",
-                                        key="edit_parqueo"
-                                    )
-                                    edit_parqueo = limpiar_numero(edit_parqueo_texto)
 
                                 col1, col2, col3 = st.columns(3)
                                 with col1:
